@@ -2,13 +2,9 @@ global:
   scrape_interval: 5s
 
 scrape_configs:
-  - job_name: watchdog
+  - job_name: watchdog-output
     static_configs:
       - targets: ["127.0.0.1:9108"]
-global:
-  scrape_interval: 5s
-
-scrape_configs:
-  - job_name: watchdog
+  - job_name: observer-input
     static_configs:
-      - targets: ["127.0.0.1:9108"]
+      - targets: ["127.0.0.1:9109"]

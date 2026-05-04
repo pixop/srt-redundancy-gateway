@@ -6,6 +6,7 @@ import signal
 import socket
 import threading
 import time
+from collections import deque
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -76,6 +77,18 @@ class JsonFormatter(logging.Formatter):
 
 class Watchdog:
     def __init__(self) -> None:
+        self.mode = env_str("WATCHDOG_MODE", "controller")
+        self.enable_health_polling = env_bool("WATCHDOG_ENABLE_HEALTH_POLLING", self.mode != "event_observer")
+        self.enable_switch_commands = env_bool("WATCHDOG_ENABLE_SWITCH_COMMANDS", self.mode != "event_observer")
+        self.enable_waiting_inference = env_bool(
+            "WATCHDOG_ENABLE_WAITING_INFERENCE",
+            self.mode == "event_observer",
+        )
+        self.enable_waiting_timeout_inference = env_bool("WATCHDOG_ENABLE_WAITING_TIMEOUT_INFERENCE", False)
+        self.waiting_infer_timeout_sec = env_float("WATCHDOG_WAITING_INFER_TIMEOUT_SEC", 3.0)
+        self.waiting_flap_window_sec = env_float("WATCHDOG_WAITING_FLAP_WINDOW_SEC", 8.0)
+        self.waiting_flap_threshold = env_int("WATCHDOG_WAITING_FLAP_THRESHOLD", 3)
+
         self.node_a = NodeState("a", env_str("NODE_A_HEALTH_URL", "http://127.0.0.1:18081/health"))
         self.node_b = NodeState("b", env_str("NODE_B_HEALTH_URL", "http://127.0.0.1:18082/health"))
 
@@ -95,6 +108,8 @@ class Watchdog:
 
         self.current_active_input = env_int("WATCHDOG_INITIAL_ACTIVE_INPUT", 0)
         self.commanded_input = self.current_active_input
+        self.last_switch_event_ts = time.time()
+        self.recent_switches: deque[tuple[float, int]] = deque(maxlen=128)
         self.stop_event = threading.Event()
         self.event_thread: Optional[threading.Thread] = None
 
@@ -132,23 +147,49 @@ class Watchdog:
         self.metric_up = Gauge("watchdog_up", "Watchdog process running state")
         self.metric_active_input = Gauge("gateway_active_input", "Current active tsswitch input index")
         self.metric_last_switch_ts = Gauge("gateway_last_switch_unixtime", "Unix time of last successful switch command")
-        self.metric_node_health = Gauge("watchdog_node_health", "Node stable health (1=healthy,0=not healthy)", ["node"])
-        self.metric_good_streak = Gauge("watchdog_node_good_streak", "Consecutive successful checks", ["node"])
-        self.metric_bad_streak = Gauge("watchdog_node_bad_streak", "Consecutive failed checks", ["node"])
-        self.metric_health_checks = Counter(
-            "watchdog_health_checks_total", "Total health checks by result", ["node", "result"]
-        )
-        self.metric_health_latency = Histogram("watchdog_health_check_latency_seconds", "Health check latency", ["node"])
-        self.metric_switch_cmd = Counter(
-            "watchdog_switch_commands_total", "Switch commands sent to tsswitch", ["target", "result"]
-        )
+
+        if self.enable_health_polling:
+            self.metric_node_health = Gauge("watchdog_node_health", "Node stable health (1=healthy,0=not healthy)", ["node"])
+            self.metric_good_streak = Gauge("watchdog_node_good_streak", "Consecutive successful checks", ["node"])
+            self.metric_bad_streak = Gauge("watchdog_node_bad_streak", "Consecutive failed checks", ["node"])
+            self.metric_health_checks = Counter(
+                "watchdog_health_checks_total", "Total health checks by result", ["node", "result"]
+            )
+            self.metric_health_latency = Histogram("watchdog_health_check_latency_seconds", "Health check latency", ["node"])
+        else:
+            self.metric_node_health = None
+            self.metric_good_streak = None
+            self.metric_bad_streak = None
+            self.metric_health_checks = None
+            self.metric_health_latency = None
+
+        if self.enable_switch_commands:
+            self.metric_switch_cmd = Counter(
+                "watchdog_switch_commands_total", "Switch commands sent to tsswitch", ["target", "result"]
+            )
+        else:
+            self.metric_switch_cmd = None
+
         self.metric_switch_events = Counter("watchdog_switch_events_total", "Input switch events observed")
+        self.metric_events_total = Counter("watchdog_events_total", "Total JSON events received from tsswitch")
+        self.metric_event_type_total = Counter(
+            "watchdog_event_type_total",
+            "Total JSON events by extracted event type",
+            ["event_type"],
+        )
+        self.metric_event_parse_failures = Counter("watchdog_event_parse_failures_total", "Malformed/unparseable event payloads")
+        self.metric_last_event_ts = Gauge("watchdog_last_event_unixtime", "Unix time of the last received tsswitch event")
+        self.metric_waiting_for_input = Gauge(
+            "gateway_waiting_for_input",
+            "Whether tsswitch appears to be waiting for a valid input (1=yes,0=no)",
+        )
         self.metric_loop_errors = Counter("watchdog_loop_errors_total", "Main loop exceptions")
 
     def start(self) -> None:
         start_http_server(self.metrics_port, addr=self.metrics_host)
         self.metric_up.set(1)
         self.metric_active_input.set(self.current_active_input)
+        self.metric_waiting_for_input.set(0)
 
         self.logger.info(
             "watchdog_starting",
@@ -162,6 +203,14 @@ class Watchdog:
                     "event_port": self.event_port,
                     "metrics_host": self.metrics_host,
                     "metrics_port": self.metrics_port,
+                    "mode": self.mode,
+                    "enable_health_polling": self.enable_health_polling,
+                    "enable_switch_commands": self.enable_switch_commands,
+                    "enable_waiting_inference": self.enable_waiting_inference,
+                    "enable_waiting_timeout_inference": self.enable_waiting_timeout_inference,
+                    "waiting_infer_timeout_sec": self.waiting_infer_timeout_sec,
+                    "waiting_flap_window_sec": self.waiting_flap_window_sec,
+                    "waiting_flap_threshold": self.waiting_flap_threshold,
                     "poll_interval_sec": self.poll_interval,
                     "health_timeout_sec": self.timeout,
                     "good_threshold": self.good_threshold,
@@ -176,7 +225,9 @@ class Watchdog:
 
         while not self.stop_event.is_set():
             try:
-                self.run_cycle()
+                if self.enable_health_polling:
+                    self.run_cycle()
+                self._refresh_waiting_inference()
             except Exception as exc:  # pragma: no cover
                 self.metric_loop_errors.inc()
                 self.logger.exception("main_loop_error", extra={"extra_data": {"error": str(exc)}})
@@ -232,8 +283,10 @@ class Watchdog:
                 result = "timeout_or_network"
             finally:
                 latency = time.monotonic() - started
-                self.metric_health_latency.labels(node=node.name).observe(latency)
-                self.metric_health_checks.labels(node=node.name, result=result).inc()
+                if self.metric_health_latency is not None:
+                    self.metric_health_latency.labels(node=node.name).observe(latency)
+                if self.metric_health_checks is not None:
+                    self.metric_health_checks.labels(node=node.name, result=result).inc()
 
             if ok:
                 node.good_streak += 1
@@ -249,9 +302,12 @@ class Watchdog:
                 node.stable_unhealthy = True
                 node.stable_healthy = False
 
-            self.metric_node_health.labels(node=node.name).set(1 if node.stable_healthy else 0)
-            self.metric_good_streak.labels(node=node.name).set(node.good_streak)
-            self.metric_bad_streak.labels(node=node.name).set(node.bad_streak)
+            if self.metric_node_health is not None:
+                self.metric_node_health.labels(node=node.name).set(1 if node.stable_healthy else 0)
+            if self.metric_good_streak is not None:
+                self.metric_good_streak.labels(node=node.name).set(node.good_streak)
+            if self.metric_bad_streak is not None:
+                self.metric_bad_streak.labels(node=node.name).set(node.bad_streak)
 
             self.logger.info(
                 "health_polled",
@@ -284,6 +340,12 @@ class Watchdog:
         return desired
 
     def _send_switch_command(self, target_input: int) -> None:
+        if not self.enable_switch_commands:
+            self.logger.info(
+                "switch_command_skipped",
+                extra={"extra_data": {"reason": "switch_commands_disabled", "target_input": target_input}},
+            )
+            return
         with self._span("send_switch_command"):
             payload = f"{target_input}\n".encode("utf-8")
             try:
@@ -291,7 +353,8 @@ class Watchdog:
                 sock.sendto(payload, (self.remote_host, self.remote_port))
                 sock.close()
                 self.commanded_input = target_input
-                self.metric_switch_cmd.labels(target=str(target_input), result="ok").inc()
+                if self.metric_switch_cmd is not None:
+                    self.metric_switch_cmd.labels(target=str(target_input), result="ok").inc()
                 self.metric_last_switch_ts.set(time.time())
                 self.logger.info(
                     "switch_command_sent",
@@ -304,7 +367,8 @@ class Watchdog:
                     },
                 )
             except Exception as exc:
-                self.metric_switch_cmd.labels(target=str(target_input), result="error").inc()
+                if self.metric_switch_cmd is not None:
+                    self.metric_switch_cmd.labels(target=str(target_input), result="error").inc()
                 self.logger.error(
                     "switch_command_failed",
                     extra={"extra_data": {"target_input": target_input, "error": str(exc)}},
@@ -332,32 +396,84 @@ class Watchdog:
             try:
                 event = json.loads(raw)
             except json.JSONDecodeError:
+                self.metric_event_parse_failures.inc()
                 self.logger.warning("event_parse_failed", extra={"extra_data": {"raw": raw}})
                 continue
 
+            self.metric_events_total.inc()
+            self.metric_last_event_ts.set(time.time())
+            event_type = self._extract_event_type(event)
+            self.metric_event_type_total.labels(event_type=event_type).inc()
+
             new_input = self._extract_new_input(event)
             if new_input is not None:
+                previous_input = self.current_active_input
                 self.current_active_input = new_input
+                self.last_switch_event_ts = time.time()
                 self.metric_active_input.set(new_input)
+                if previous_input != new_input:
+                    self.recent_switches.append((time.time(), new_input))
                 self.metric_switch_events.inc()
-                self.logger.info("switch_event_observed", extra={"extra_data": {"event": event, "active_input": new_input}})
+                self.logger.info(
+                    "switch_event_observed",
+                    extra={
+                        "extra_data": {
+                            "event_type": event_type,
+                            "event": event,
+                            "active_input": new_input,
+                            "flapping_waiting": self._is_flapping_waiting(),
+                        }
+                    },
+                )
             else:
-                self.logger.info("event_observed", extra={"extra_data": {"event": event}})
+                self.logger.info("event_observed", extra={"extra_data": {"event_type": event_type, "event": event}})
 
         sock.close()
 
+    def _refresh_waiting_inference(self) -> None:
+        if not self.enable_waiting_inference:
+            return
+        flapping = self._is_flapping_waiting()
+        timeout_waiting = self.enable_waiting_timeout_inference and (
+            (time.time() - self.last_switch_event_ts) >= self.waiting_infer_timeout_sec
+        )
+        waiting_now = flapping or timeout_waiting
+        self.metric_waiting_for_input.set(1 if waiting_now else 0)
+
+    def _is_flapping_waiting(self) -> bool:
+        now = time.time()
+        while self.recent_switches and (now - self.recent_switches[0][0]) > self.waiting_flap_window_sec:
+            self.recent_switches.popleft()
+        if len(self.recent_switches) < self.waiting_flap_threshold:
+            return False
+        inputs = {item[1] for item in self.recent_switches}
+        return len(inputs) >= 2
+
     @staticmethod
     def _extract_new_input(event: dict) -> Optional[int]:
+        # Authoritative tsswitch --event-udp schema (from TSDuck source):
+        # {
+        #   "event": "newinput",
+        #   "previous-input": <int>,
+        #   "new-input": <int>,
+        #   ...
+        # }
         if not isinstance(event, dict):
             return None
-        candidates = ("new_input", "new", "input", "current_input", "current")
-        for key in candidates:
-            value = event.get(key)
-            if isinstance(value, int):
-                return value
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
+        value = event.get("new-input")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
         return None
+
+    @staticmethod
+    def _extract_event_type(event: object) -> str:
+        if isinstance(event, dict):
+            value = event.get("event")
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+        return "unknown"
 
     def _span(self, name: str):
         if self.tracer is None:
@@ -383,339 +499,6 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    watchdog.start()
-
-
-if __name__ == "__main__":
-    main()
-#!/usr/bin/env python3
-import json
-import os
-import signal
-import socket
-import threading
-import time
-from dataclasses import dataclass
-from typing import Optional
-
-import requests
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
-
-try:
-    from opentelemetry import trace
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-except Exception:  # pragma: no cover
-    trace = None
-
-
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def log(level: str, message: str, **fields: object) -> None:
-    payload = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "level": level,
-        "msg": message,
-        **fields,
-    }
-    print(json.dumps(payload, sort_keys=True), flush=True)
-
-
-@dataclass
-class NodeState:
-    name: str
-    url: str
-    healthy: bool = False
-    stable_healthy: bool = False
-    consecutive_good: int = 0
-    consecutive_bad: int = 0
-
-
-class TSSwitchClient:
-    def __init__(self, remote_host: str, remote_port: int):
-        self._addr = (remote_host, remote_port)
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    def set_input(self, index: int) -> None:
-        payload = f"{index}\n".encode("utf-8")
-        self._sock.sendto(payload, self._addr)
-
-
-class EventListener(threading.Thread):
-    def __init__(self, host: str, port: int, stop_event: threading.Event):
-        super().__init__(daemon=True)
-        self._host = host
-        self._port = port
-        self._stop_event = stop_event
-        self._sock: Optional[socket.socket] = None
-        self.last_active_input: Optional[int] = None
-        self.last_event: Optional[dict] = None
-
-    def run(self) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock.bind((self._host, self._port))
-        self._sock.settimeout(0.5)
-        log("INFO", "event listener started", host=self._host, port=self._port)
-        while not self._stop_event.is_set():
-            try:
-                data, peer = self._sock.recvfrom(65535)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            text = data.decode("utf-8", errors="replace").strip()
-            parsed = self._parse_event(text)
-            if parsed is not None:
-                self.last_active_input = parsed
-                log("INFO", "received switch event", peer=f"{peer[0]}:{peer[1]}", active_input=parsed)
-        log("INFO", "event listener stopped")
-
-    def close(self) -> None:
-        if self._sock is not None:
-            self._sock.close()
-
-    @staticmethod
-    def _parse_event(text: str) -> Optional[int]:
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-
-        # tsswitch event schemas may vary across versions, so parse defensively.
-        for key in ("newinput", "new_input", "current_input", "input"):
-            value = payload.get(key)
-            if isinstance(value, int):
-                return value
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
-        return None
-
-
-class Watchdog:
-    def __init__(self):
-        self.node_a = NodeState("a", os.getenv("WATCHDOG_NODE_A_URL", "http://127.0.0.1:18081/health"))
-        self.node_b = NodeState("b", os.getenv("WATCHDOG_NODE_B_URL", "http://127.0.0.1:18082/health"))
-        self.poll_interval = float(os.getenv("WATCHDOG_POLL_INTERVAL_SECONDS", "1.0"))
-        self.timeout_seconds = float(os.getenv("WATCHDOG_HTTP_TIMEOUT_SECONDS", "1.5"))
-        self.good_threshold = int(os.getenv("WATCHDOG_GOOD_THRESHOLD", "2"))
-        self.bad_threshold = int(os.getenv("WATCHDOG_BAD_THRESHOLD", "3"))
-        self.current_input = int(os.getenv("WATCHDOG_INITIAL_INPUT", "0"))
-
-        remote_host = os.getenv("TSSWITCH_REMOTE_HOST", "127.0.0.1")
-        remote_port = int(os.getenv("TSSWITCH_REMOTE_PORT", "4444"))
-        self.switch_client = TSSwitchClient(remote_host, remote_port)
-
-        self.stop_event = threading.Event()
-        self.enable_event_listener = env_bool("WATCHDOG_ENABLE_EVENT_LISTENER", True)
-        self.event_listener = None
-        if self.enable_event_listener:
-            event_host = os.getenv("WATCHDOG_EVENT_LISTEN_HOST", "0.0.0.0")
-            event_port = int(os.getenv("WATCHDOG_EVENT_LISTEN_PORT", "4545"))
-            self.event_listener = EventListener(event_host, event_port, self.stop_event)
-
-        metrics_host = os.getenv("WATCHDOG_METRICS_HOST", "0.0.0.0")
-        metrics_port = int(os.getenv("WATCHDOG_METRICS_PORT", "9108"))
-        start_http_server(metrics_port, addr=metrics_host)
-        log("INFO", "metrics server started", host=metrics_host, port=metrics_port)
-
-        self._configure_tracing()
-        self.tracer = trace.get_tracer(__name__) if trace else None
-
-    def _configure_tracing(self) -> None:
-        if not env_bool("OTEL_ENABLED", False):
-            return
-        if trace is None:
-            log("WARN", "otel modules unavailable; tracing disabled")
-            return
-
-        endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318")
-        insecure = env_bool("OTEL_EXPORTER_OTLP_INSECURE", True)
-        service_name = os.getenv("OTEL_SERVICE_NAME", "srt-redundancy-watchdog")
-
-        provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-        exporter = OTLPSpanExporter(endpoint=f"{endpoint.rstrip('/')}/v1/traces", insecure=insecure)
-        provider.add_span_processor(BatchSpanProcessor(exporter))
-        trace.set_tracer_provider(provider)
-        log("INFO", "otel tracing enabled", endpoint=endpoint, service_name=service_name)
-
-    def start(self) -> None:
-        signal.signal(signal.SIGINT, self._handle_signal)
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        if self.event_listener is not None:
-            self.event_listener.start()
-
-        log(
-            "INFO",
-            "watchdog started",
-            poll_interval_seconds=self.poll_interval,
-            timeout_seconds=self.timeout_seconds,
-            good_threshold=self.good_threshold,
-            bad_threshold=self.bad_threshold,
-            initial_input=self.current_input,
-        )
-        ACTIVE_INPUT_GAUGE.set(self.current_input)
-
-        while not self.stop_event.is_set():
-            loop_start = time.time()
-            self._check_node(self.node_a)
-            self._check_node(self.node_b)
-            self._decide()
-            WATCHDOG_LOOP_SECONDS.observe(time.time() - loop_start)
-            self.stop_event.wait(self.poll_interval)
-
-        if self.event_listener is not None:
-            self.event_listener.close()
-        log("INFO", "watchdog stopped")
-
-    def _handle_signal(self, signum: int, _frame: object) -> None:
-        log("INFO", "termination signal received", signal=signum)
-        self.stop_event.set()
-
-    def _check_node(self, node: NodeState) -> None:
-        span_ctx = self.tracer.start_as_current_span(f"health_check_{node.name}") if self.tracer else None
-        if span_ctx is None:
-            self._do_check(node)
-            return
-        with span_ctx as span:
-            self._do_check(node, span)
-
-    def _do_check(self, node: NodeState, span=None) -> None:
-        start = time.time()
-        status = "error"
-        try:
-            response = requests.get(node.url, timeout=self.timeout_seconds)
-            node.healthy = 200 <= response.status_code < 400
-            status = "ok" if node.healthy else "bad_status"
-        except requests.Timeout:
-            node.healthy = False
-            status = "timeout"
-            HEALTH_CHECK_FAILURES.labels(node=node.name, reason="timeout").inc()
-        except Exception:
-            node.healthy = False
-            status = "error"
-            HEALTH_CHECK_FAILURES.labels(node=node.name, reason="error").inc()
-
-        latency = time.time() - start
-        HEALTH_CHECK_DURATION.labels(node=node.name).observe(latency)
-        NODE_HEALTH_GAUGE.labels(node=node.name).set(1 if node.healthy else 0)
-
-        if node.healthy:
-            node.consecutive_good += 1
-            node.consecutive_bad = 0
-            if node.consecutive_good >= self.good_threshold:
-                node.stable_healthy = True
-        else:
-            node.consecutive_bad += 1
-            node.consecutive_good = 0
-            if node.consecutive_bad >= self.bad_threshold:
-                node.stable_healthy = False
-
-        NODE_STABLE_HEALTH_GAUGE.labels(node=node.name).set(1 if node.stable_healthy else 0)
-        NODE_GOOD_STREAK_GAUGE.labels(node=node.name).set(node.consecutive_good)
-        NODE_BAD_STREAK_GAUGE.labels(node=node.name).set(node.consecutive_bad)
-
-        if span is not None:
-            span.set_attribute("node.name", node.name)
-            span.set_attribute("node.url", node.url)
-            span.set_attribute("health.status", status)
-            span.set_attribute("health.latency_seconds", latency)
-            span.set_attribute("health.stable_healthy", node.stable_healthy)
-
-        log(
-            "DEBUG",
-            "node polled",
-            node=node.name,
-            healthy=node.healthy,
-            stable_healthy=node.stable_healthy,
-            good_streak=node.consecutive_good,
-            bad_streak=node.consecutive_bad,
-            latency_ms=int(latency * 1000),
-        )
-
-    def _decide(self) -> None:
-        desired_input = self.current_input
-        reason = "hold"
-
-        if self.node_a.stable_healthy:
-            desired_input = 0
-            reason = "prefer_a_healthy"
-        elif (not self.node_a.stable_healthy) and self.node_b.stable_healthy:
-            desired_input = 1
-            reason = "a_unhealthy_b_healthy"
-
-        DECISION_COUNTER.labels(reason=reason).inc()
-
-        if desired_input == self.current_input:
-            ACTIVE_INPUT_GAUGE.set(self.current_input)
-            return
-
-        span_ctx = self.tracer.start_as_current_span("switch_input") if self.tracer else None
-        if span_ctx is None:
-            self._apply_switch(desired_input, reason)
-            return
-        with span_ctx as span:
-            span.set_attribute("from_input", self.current_input)
-            span.set_attribute("to_input", desired_input)
-            span.set_attribute("reason", reason)
-            self._apply_switch(desired_input, reason)
-
-    def _apply_switch(self, desired_input: int, reason: str) -> None:
-        previous = self.current_input
-        try:
-            self.switch_client.set_input(desired_input)
-        except Exception as exc:
-            COMMAND_FAILURES.inc()
-            log("ERROR", "failed to send switch command", error=str(exc), desired_input=desired_input)
-            return
-
-        self.current_input = desired_input
-        ACTIVE_INPUT_GAUGE.set(self.current_input)
-        SWITCH_COUNTER.labels(reason=reason).inc()
-        LAST_SWITCH_UNIX.set(time.time())
-        log("INFO", "switch command sent", previous_input=previous, current_input=self.current_input, reason=reason)
-
-        if self.event_listener and self.event_listener.last_active_input is not None:
-            EVENT_REPORTED_INPUT_GAUGE.set(self.event_listener.last_active_input)
-
-
-ACTIVE_INPUT_GAUGE = Gauge("gateway_active_input", "Current active tsswitch input index")
-EVENT_REPORTED_INPUT_GAUGE = Gauge(
-    "gateway_event_reported_input",
-    "Active input index reported via tsswitch event stream",
-)
-LAST_SWITCH_UNIX = Gauge("gateway_last_switch_unix_seconds", "Unix timestamp of last switch command")
-NODE_HEALTH_GAUGE = Gauge("gateway_node_health", "Instant health check result (1=healthy)", ["node"])
-NODE_STABLE_HEALTH_GAUGE = Gauge("gateway_node_stable_health", "Hysteresis-filtered node health", ["node"])
-NODE_GOOD_STREAK_GAUGE = Gauge("gateway_node_good_streak", "Consecutive healthy poll count", ["node"])
-NODE_BAD_STREAK_GAUGE = Gauge("gateway_node_bad_streak", "Consecutive unhealthy poll count", ["node"])
-SWITCH_COUNTER = Counter("gateway_switch_total", "Number of switch commands sent", ["reason"])
-COMMAND_FAILURES = Counter("gateway_switch_command_failures_total", "Switch command send failures")
-DECISION_COUNTER = Counter("gateway_decision_total", "Decision loop outcomes", ["reason"])
-HEALTH_CHECK_FAILURES = Counter(
-    "gateway_health_check_failures_total", "Health check failures", ["node", "reason"]
-)
-HEALTH_CHECK_DURATION = Histogram(
-    "gateway_health_check_duration_seconds",
-    "Health check latency",
-    ["node"],
-    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0),
-)
-WATCHDOG_LOOP_SECONDS = Histogram(
-    "gateway_watchdog_loop_duration_seconds",
-    "Watchdog loop execution duration",
-    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25),
-)
-
-
-def main() -> None:
-    watchdog = Watchdog()
     watchdog.start()
 
 

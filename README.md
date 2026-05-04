@@ -18,6 +18,7 @@ unchanged.
 - Primary input is preferred (`--primary-input 0`).
 - On packet timeout (`--receive-timeout`), `tsswitch` selects backup.
 - One selected SRT listener output is exposed downstream.
+- `tsswitch --event-udp` events can be exported and observed by an event-only observer service.
 
 ### Output redundancy
 
@@ -37,6 +38,7 @@ restartable and improves reconnect behavior for listener/caller workflows.
 ## Repository layout
 
 - `docker/tsduck-gateway/Dockerfile` - gateway image with TSDuck tools
+- `docker/tsduck-tools/Dockerfile` - standalone TSDuck tools image for local generators
 - `gateway/commands/input-failover.sh` - input redundancy command wrapper
 - `gateway/commands/output-failover.sh` - output redundancy command wrapper
 - `docker/health-watchdog/Dockerfile` - watchdog image
@@ -54,20 +56,38 @@ restartable and improves reconnect behavior for listener/caller workflows.
 cp .env.example .env
 ```
 
-2. Start input failover gateway:
+2. Build local `tsduck-tools` base image (required for local gateway builds):
+
+```bash
+docker build -f docker/tsduck-tools/Dockerfile -t srt-redundancy-gateway-tsduck-tools:local .
+```
+
+3. Start input failover gateway:
 
 ```bash
 docker compose -f compose/input-failover.yml up --build
 ```
 
-3. In separate terminals, feed test streams:
+Alternative one-command demo startup (includes a dummy downstream consumer):
+
+```bash
+make up-input-demo
+```
+
+4. Start a downstream consumer (keeps output listener active during tests):
+
+```bash
+bash examples/consume-input-output.sh
+```
+
+5. In separate terminals, feed test streams:
 
 ```bash
 bash examples/generate-primary.sh
 bash examples/generate-backup.sh
 ```
 
-4. Simulate primary failure by stopping `generate-primary.sh` and verify output
+6. Simulate primary failure by stopping `generate-primary.sh` and verify output
    remains available on `${INPUT_FAILOVER_OUTPUT_LISTEN_PORT}`.
 
 ## Output failover quick start
@@ -81,8 +101,8 @@ docker compose -f compose/output-failover.yml up --build
 2. Feed node outputs:
 
 ```bash
-bash examples/generate-node-a.sh
-bash examples/generate-node-b.sh
+TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash examples/generate-node-a.sh
+TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash examples/generate-node-b.sh
 ```
 
 3. Point node health endpoints in `.env`:
@@ -104,6 +124,7 @@ docker compose -f compose/output-failover.yml --profile observability up --build
 Included:
 
 - Watchdog Prometheus endpoint: `http://127.0.0.1:9108/metrics`
+- Input event observer endpoint: `http://127.0.0.1:9109/metrics` (when enabled)
 - Prometheus: `http://127.0.0.1:9090`
 - Grafana: `http://127.0.0.1:3000` (admin/admin)
 - OTEL Collector receiver: `127.0.0.1:4318` (HTTP), `127.0.0.1:4317` (gRPC)
@@ -118,18 +139,40 @@ Grafana is auto-provisioned with:
 Key watchdog metrics:
 
 - `gateway_active_input`
+- `gateway_waiting_for_input`
 - `gateway_last_switch_unixtime`
 - `watchdog_switch_commands_total`
 - `watchdog_switch_events_total`
+- `watchdog_event_type_total{event_type=...}`
 - `watchdog_node_health`
 - `watchdog_health_checks_total`
 - `watchdog_health_check_latency_seconds`
+
+For input gateway-only observability (no controller watchdog), run:
+
+```bash
+docker compose -f compose/input-failover.yml --profile observability up --build
+```
+
+This starts:
+
+- `input-gateway` (emits `--event-udp` to `${INPUT_EVENT_UDP_HOST}:${INPUT_EVENT_UDP_PORT}`)
+- `input-event-observer` (listens on `${INPUT_EVENT_UDP_PORT}` and exports metrics on `:9109`)
+
+Note: in input observer mode, `gateway_waiting_for_input` can be inferred from
+rapid input flapping with:
+`INPUT_OBSERVER_WAITING_FLAP_WINDOW_SEC` and
+`INPUT_OBSERVER_WAITING_FLAP_THRESHOLD`.
+Optional timeout-based inference can be enabled with
+`INPUT_OBSERVER_WAITING_TIMEOUT_INFERENCE=true` and tuned with
+`INPUT_OBSERVER_WAITING_INFER_TIMEOUT_SEC`.
 
 ## Local test instructions
 
 ### Input gateway continuity check
 
 - Start `compose/input-failover.yml`.
+- Start `examples/consume-input-output.sh` to attach a downstream receiver on `:6000`.
 - Start both `examples/generate-primary.sh` and `examples/generate-backup.sh`.
 - Consume output from `srt://127.0.0.1:${INPUT_FAILOVER_OUTPUT_LISTEN_PORT}`.
 - Stop primary generator and confirm stream continuity from backup.
@@ -164,12 +207,23 @@ bash examples/set-health.sh 18081 healthy
 
 - Keep ports/envs explicit; avoid hardcoded node-specific assumptions.
 - Use host networking for operational simplicity in SRT-heavy environments.
+- `tsduck-tools` image builds TSDuck from source (pinned tag in Dockerfile); first build can take several minutes.
 - Keep health checks cheap and deterministic.
 - Tune `WATCHDOG_GOOD_THRESHOLD` / `WATCHDOG_BAD_THRESHOLD` to your jitter profile.
 - Consider adding node-exporter/cAdvisor if container/system-level telemetry is required.
 
+## Docker image publishing
+
+For Docker Hub publishing steps, see `scripts/README.md`.
+
+## Troubleshooting
+
+- `generate-primary.sh` times out on `srt_connect`:
+  - Ensure a downstream consumer is connected first (`bash examples/consume-input-output.sh`), or run `make up-input-demo`.
+  - Recreate cleanly: `docker compose -f compose/input-failover.yml down && docker compose -f compose/input-failover.yml up --build`.
+  - Verify gateway logs include the `tsswitch` startup line and no rapid restarts.
+
 ## Limitations (v1)
 
 - No Kubernetes manifests yet.
-- No built-in mock health service container in compose.
-- Grafana datasource/dashboards are not auto-provisioned yet (manual setup).
+- OTel traces are wired for export, but advanced sampling/tail-based processing is not configured.

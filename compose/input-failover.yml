@@ -14,23 +14,58 @@ services:
       INPUT_FAILOVER_OUTPUT_LISTEN_PORT: ${INPUT_FAILOVER_OUTPUT_LISTEN_PORT:-6000}
       INPUT_FAILOVER_RECEIVE_TIMEOUT_MS: ${INPUT_FAILOVER_RECEIVE_TIMEOUT_MS:-2000}
       INPUT_FAILOVER_VERBOSE: ${INPUT_FAILOVER_VERBOSE:-1}
+      INPUT_EVENT_UDP_HOST: ${INPUT_EVENT_UDP_HOST:-127.0.0.1}
+      INPUT_EVENT_UDP_PORT: ${INPUT_EVENT_UDP_PORT:-5557}
+      INPUT_EVENT_USER_DATA: ${INPUT_EVENT_USER_DATA:-input-failover}
     command: ["bash", "/app/gateway/commands/input-failover.sh"]
-services:
-  input-gateway:
+
+  input-event-observer:
     build:
       context: ..
-      dockerfile: docker/tsduck-gateway/Dockerfile
-    image: srt-redundancy/tsduck-gateway:local
+      dockerfile: docker/health-watchdog/Dockerfile
+    container_name: srt-input-event-observer
     network_mode: host
-    command: ["/app/commands/input-failover.sh"]
-    environment:
-      COMMAND_DEBUG: ${COMMAND_DEBUG:-true}
-      PRIMARY_LISTEN_PORT: ${PRIMARY_LISTEN_PORT:-5000}
-      BACKUP_LISTEN_PORT: ${BACKUP_LISTEN_PORT:-5010}
-      INPUT_OUTPUT_LISTEN_PORT: ${INPUT_OUTPUT_LISTEN_PORT:-6000}
-      INPUT_RECEIVE_TIMEOUT_MS: ${INPUT_RECEIVE_TIMEOUT_MS:-2000}
-      INPUT_PRIMARY_INDEX: ${INPUT_PRIMARY_INDEX:-0}
-      INPUT_FAST_SWITCH: ${INPUT_FAST_SWITCH:-true}
-      INPUT_INFINITE: ${INPUT_INFINITE:-true}
-      SRT_COMMON_FLAGS: ${SRT_COMMON_FLAGS:---multiple --transtype live --messageapi}
     restart: unless-stopped
+    profiles: ["observability"]
+    depends_on:
+      - input-gateway
+    env_file:
+      - ../.env
+    environment:
+      WATCHDOG_MODE: event_observer
+      WATCHDOG_ENABLE_HEALTH_POLLING: false
+      WATCHDOG_ENABLE_SWITCH_COMMANDS: false
+      WATCHDOG_ENABLE_WAITING_INFERENCE: true
+      WATCHDOG_ENABLE_WAITING_TIMEOUT_INFERENCE: false
+      WATCHDOG_WAITING_INFER_TIMEOUT_SEC: ${INPUT_OBSERVER_WAITING_INFER_TIMEOUT_SEC:-3.0}
+      WATCHDOG_WAITING_FLAP_WINDOW_SEC: ${INPUT_OBSERVER_WAITING_FLAP_WINDOW_SEC:-8.0}
+      WATCHDOG_WAITING_FLAP_THRESHOLD: ${INPUT_OBSERVER_WAITING_FLAP_THRESHOLD:-3}
+      WATCHDOG_INITIAL_ACTIVE_INPUT: ${WATCHDOG_INITIAL_ACTIVE_INPUT:-0}
+      WATCHDOG_METRICS_HOST: ${INPUT_OBSERVER_METRICS_HOST:-0.0.0.0}
+      WATCHDOG_METRICS_PORT: ${INPUT_OBSERVER_METRICS_PORT:-9109}
+      WATCHDOG_EVENT_LISTEN_HOST: ${INPUT_OBSERVER_EVENT_LISTEN_HOST:-0.0.0.0}
+      WATCHDOG_EVENT_LISTEN_PORT: ${INPUT_EVENT_UDP_PORT:-5557}
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}
+      OTEL_SERVICE_NAME: srt-input-event-observer
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318/v1/traces}
+
+  input-test-consumer:
+    build:
+      context: ..
+      dockerfile: docker/tsduck-tools/Dockerfile
+    container_name: srt-input-test-consumer
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["demo-consumer"]
+    environment:
+      INPUT_FAILOVER_OUTPUT_LISTEN_PORT: ${INPUT_FAILOVER_OUTPUT_LISTEN_PORT:-6000}
+    command:
+      - -I
+      - srt
+      - --caller
+      - 127.0.0.1:${INPUT_FAILOVER_OUTPUT_LISTEN_PORT:-6000}
+      - --transtype
+      - live
+      - --messageapi
+      - -O
+      - drop

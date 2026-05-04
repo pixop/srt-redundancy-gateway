@@ -6,7 +6,7 @@ TARGET_PORT="${TARGET_PORT:-7002}"
 PID="${PID:-400}"
 
 echo "[generate-node-b] sending craft TS to srt://${TARGET_HOST}:${TARGET_PORT}"
-exec tsp \
+exec "$(dirname "$0")/run-tsp.sh" \
   -I craft --pid "${PID}" \
   -P regulate \
   -O srt --caller "${TARGET_HOST}:${TARGET_PORT}" --transtype live --messageapi
