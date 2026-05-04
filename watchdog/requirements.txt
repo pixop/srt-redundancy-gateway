@@ -1,0 +1,8 @@
+prometheus-client==0.21.1
+opentelemetry-api==1.28.2
+opentelemetry-sdk==1.28.2
+opentelemetry-exporter-otlp-proto-http==1.28.2
+requests
+prometheus-client
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
