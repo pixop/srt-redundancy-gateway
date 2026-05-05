@@ -438,14 +438,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(gateway_bytes_by_direction_total{direction=\"in\"}[1m]) * 8",
+          "expr": "sum(rate(gateway_bytes_total{direction=\"in\"}[1m])) * 8",
           "legendFormat": "inbound",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(gateway_bytes_by_direction_total{direction=\"out\"}[1m]) * 8",
+          "expr": "sum(rate(gateway_bytes_total{direction=\"out\"}[1m])) * 8",
           "legendFormat": "outbound",
           "range": true,
           "refId": "B"
