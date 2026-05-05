@@ -502,7 +502,7 @@ class Watchdog:
         recv_fallback: Optional[float] = None
         sent_fallback: Optional[float] = None
 
-        recv_tokens = {"recv", "received", "rx"}
+        recv_tokens = {"receive", "recv", "received", "rx"}
         sent_tokens = {"send", "sent", "tx"}
 
         stack: list[tuple[object, list[str]]] = [(stats, [])]
