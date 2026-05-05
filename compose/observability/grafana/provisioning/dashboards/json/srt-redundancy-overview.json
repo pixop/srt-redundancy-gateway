@@ -73,7 +73,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "gateway_active_input",
+          "expr": "gateway_active_input{job=\"$job\"}",
           "legendFormat": "active",
           "range": true,
           "refId": "A"
@@ -148,7 +148,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "gateway_waiting_for_input",
+          "expr": "gateway_waiting_for_input{job=\"$job\"}",
           "legendFormat": "waiting",
           "range": true,
           "refId": "A"
@@ -192,7 +192,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "watchdog_node_health",
+          "expr": "watchdog_node_health{job=\"$job\"}",
           "legendFormat": "node {{node}}",
           "range": true,
           "refId": "A"
@@ -236,14 +236,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "increase(watchdog_switch_commands_total[5m])",
+          "expr": "increase(watchdog_switch_commands_total{job=\"$job\"}[5m])",
           "legendFormat": "target {{target}} result {{result}}",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "increase(watchdog_switch_events_total[5m])",
+          "expr": "increase(watchdog_switch_events_total{job=\"$job\"}[5m])",
           "legendFormat": "events",
           "range": true,
           "refId": "B"
@@ -287,7 +287,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(watchdog_health_checks_total[5m])",
+          "expr": "rate(watchdog_health_checks_total{job=\"$job\"}[5m])",
           "legendFormat": "{{node}} {{result}}",
           "range": true,
           "refId": "A"
@@ -331,7 +331,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "increase(watchdog_events_total[5m])",
+          "expr": "increase(watchdog_events_total{job=\"$job\"}[5m])",
           "legendFormat": "events total (5m)",
           "range": true,
           "refId": "A"
@@ -393,7 +393,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "watchdog_uptime_seconds",
+          "expr": "watchdog_uptime_seconds{job=\"$job\"}",
           "legendFormat": "uptime",
           "range": true,
           "refId": "A"
@@ -438,14 +438,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(rate(gateway_bytes_total{direction=\"in\"}[1m])) * 8",
+          "expr": "sum(rate(gateway_bytes_total{job=\"$job\",direction=\"in\"}[1m])) * 8",
           "legendFormat": "inbound",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "sum(rate(gateway_bytes_total{direction=\"out\"}[1m])) * 8",
+          "expr": "sum(rate(gateway_bytes_total{job=\"$job\",direction=\"out\"}[1m])) * 8",
           "legendFormat": "outbound",
           "range": true,
           "refId": "B"
@@ -463,7 +463,35 @@
     "watchdog"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "watchdog-output",
+          "value": "watchdog-output"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(watchdog_up, job)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Source Job",
+        "multi": false,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(watchdog_up, job)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-15m",
@@ -473,6 +501,6 @@
   "timezone": "",
   "title": "SRT Redundancy Overview",
   "uid": "srt-redundancy-overview",
-  "version": 5,
+  "version": 6,
   "weekStart": ""
 }
