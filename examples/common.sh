@@ -8,3 +8,11 @@ ensure_input_gateway_namespace_for_dockerized_tsp() {
   fi
 }
 
+# When example scripts run via dockerized tsp against host-network services,
+# keep 127.0.0.1 in the host namespace.
+ensure_host_network_for_dockerized_tsp() {
+  if ! command -v tsp >/dev/null 2>&1; then
+    export TSDUCK_TOOLS_DOCKER_NETWORK="${TSDUCK_TOOLS_DOCKER_NETWORK:-host}"
+  fi
+}
+
