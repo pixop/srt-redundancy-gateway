@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/common.sh"
+
 if [[ $# -lt 2 ]]; then
   echo "Usage: $0 <port> <healthy|unhealthy> [token]"
   exit 1

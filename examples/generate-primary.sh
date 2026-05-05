@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/common.sh"
+
 TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
 TARGET_PORT="${TARGET_PORT:-5000}"
 PID="${PID:-100}"
 
-if ! command -v tsp >/dev/null 2>&1; then
-  # Run in the gateway container namespace so localhost targets the listener.
-  export TSDUCK_TOOLS_DOCKER_NETWORK="${TSDUCK_TOOLS_DOCKER_NETWORK:-container:srt-input-gateway}"
-fi
+ensure_input_gateway_namespace_for_dockerized_tsp
 
 echo "[generate-primary] sending craft TS to srt://${TARGET_HOST}:${TARGET_PORT}"
-exec "$(dirname "$0")/run-tsp.sh" \
+exec "${SCRIPT_DIR}/run-tsp.sh" \
   -I craft --pid "${PID}" \
   -P regulate \
   -O srt --caller "${TARGET_HOST}:${TARGET_PORT}" --transtype live --messageapi
