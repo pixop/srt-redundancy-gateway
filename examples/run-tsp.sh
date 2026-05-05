@@ -25,4 +25,4 @@ if [[ "${TSDUCK_TOOLS_DOCKER_PULL}" == "true" ]]; then
 fi
 
 echo "[run-tsp] local tsp not found, using docker image ${TSDUCK_TOOLS_IMAGE}"
-exec docker run --rm --network "${TSDUCK_TOOLS_DOCKER_NETWORK}" "${TSDUCK_TOOLS_IMAGE}" "$@"
+exec docker run --rm --init --sig-proxy=true --network "${TSDUCK_TOOLS_DOCKER_NETWORK}" "${TSDUCK_TOOLS_IMAGE}" "$@"

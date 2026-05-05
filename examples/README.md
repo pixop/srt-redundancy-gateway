@@ -18,11 +18,16 @@ For input failover generators, when local `tsp` is missing they default to:
 This makes `127.0.0.1:5000` and `127.0.0.1:5010` target the actual gateway
 listener namespace directly.
 
+For output failover scripts, dockerized `tsp` defaults to host networking so
+`127.0.0.1:7001`, `:7002`, and `:8000` stay in the same namespace as the
+host-network output gateway.
+
 - `generate-primary.sh` -> primary input listener (default `:5000`)
 - `generate-backup.sh` -> backup input listener (default `:5010`)
 - `generate-node-a.sh` -> output failover node A caller target (default `:7001`)
 - `generate-node-b.sh` -> output failover node B caller target (default `:7002`)
 - `consume-input-output.sh` -> dummy downstream consumer for input gateway output (`:6000`)
+- `consume-output-output.sh` -> dummy downstream consumer for output gateway output (`:8000`)
 - `mock-health-service.py` -> tiny controllable HTTP health endpoint
 - `set-health.sh` -> helper to flip mock health state
 

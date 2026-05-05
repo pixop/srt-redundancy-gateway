@@ -16,21 +16,21 @@ down-output-demo-health:
 	docker compose -f compose/output-failover.yml --profile demo-health down
 
 up-input-observability:
-	docker compose -f compose/input-failover.yml -f compose/observability.yml --profile observability up --build
+	docker compose -f compose/input-failover.yml --profile observability up --build
 
 down-input-observability:
-	docker compose -f compose/input-failover.yml -f compose/observability.yml --profile observability down
+	docker compose -f compose/input-failover.yml --profile observability down
 
 up-output-observability:
-	docker compose -f compose/output-failover.yml -f compose/observability.yml --profile observability up --build
+	docker compose -f compose/output-failover.yml --profile observability up --build
 
 down-output-observability:
-	docker compose -f compose/output-failover.yml -f compose/observability.yml --profile observability down
+	docker compose -f compose/output-failover.yml --profile observability down
 
-up-both-observability:
+up-all:
 	docker compose -f compose/input-failover.yml -f compose/output-failover.yml -f compose/observability.yml --profile observability up --build
 
-down-both-observability:
+down-all:
 	docker compose -f compose/input-failover.yml -f compose/output-failover.yml -f compose/observability.yml --profile observability down
 
 release:

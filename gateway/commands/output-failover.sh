@@ -14,7 +14,7 @@ EVENT_UDP_HOST="${TSSWITCH_EVENT_UDP_HOST:-127.0.0.1}"
 EVENT_UDP_PORT="${TSSWITCH_EVENT_UDP_PORT:-5556}"
 VERBOSE="${OUTPUT_FAILOVER_VERBOSE:-1}"
 OUTPUT_SRT_STATS_INTERVAL_MS="${OUTPUT_SRT_STATS_INTERVAL_MS:-5000}"
-OUTPUT_SRT_SOURCE_COMMON_FLAGS="${OUTPUT_SRT_SOURCE_COMMON_FLAGS:---transtype live --messageapi}"
+OUTPUT_SRT_SOURCE_COMMON_FLAGS="${OUTPUT_SRT_SOURCE_COMMON_FLAGS:---multiple --transtype live --messageapi}"
 OUTPUT_SRT_NODE_A_EXTRA_FLAGS="${OUTPUT_SRT_NODE_A_EXTRA_FLAGS:-}"
 OUTPUT_SRT_NODE_B_EXTRA_FLAGS="${OUTPUT_SRT_NODE_B_EXTRA_FLAGS:-}"
 OUTPUT_SRT_OUTPUT_EXTRA_FLAGS="${OUTPUT_SRT_OUTPUT_EXTRA_FLAGS:---multiple --transtype live --messageapi}"
@@ -44,13 +44,12 @@ forward_stats_from_logs() {
   fi
 }
 
-# In caller mode, wrapping the SRT source with -I fork keeps each leg
-# independently restartable after network/peer interruptions.
+# Wrap each SRT listener leg with -I fork so disconnected/idle sessions can
+# restart independently without retiring the leg inside long-running failover.
 CMD=(
   tsswitch
   "${TSSWITCH_ARGS[@]}"
   --fast-switch
-  --primary-input 0
   --receive-timeout "${RECEIVE_TIMEOUT_MS}"
   --infinite
   --remote "${REMOTE_HOST}:${REMOTE_PORT}"
@@ -59,10 +58,10 @@ CMD=(
   --event-user-data "srt-redundancy-gateway"
   -I
   fork
-  "tsp -I srt --caller ${NODE_A_HOST}:${NODE_A_PORT} ${OUTPUT_SRT_SOURCE_COMMON_FLAGS} ${OUTPUT_SRT_NODE_A_EXTRA_FLAGS} --statistics-interval ${OUTPUT_SRT_STATS_INTERVAL_MS} --json-line=SRTSTATS_OUTPUT_NODE_A: -O file -"
+  "tsp -I srt --listener :${NODE_A_PORT} ${OUTPUT_SRT_SOURCE_COMMON_FLAGS} ${OUTPUT_SRT_NODE_A_EXTRA_FLAGS} --statistics-interval ${OUTPUT_SRT_STATS_INTERVAL_MS} --json-line=SRTSTATS_OUTPUT_NODE_A: -O file -"
   -I
   fork
-  "tsp -I srt --caller ${NODE_B_HOST}:${NODE_B_PORT} ${OUTPUT_SRT_SOURCE_COMMON_FLAGS} ${OUTPUT_SRT_NODE_B_EXTRA_FLAGS} --statistics-interval ${OUTPUT_SRT_STATS_INTERVAL_MS} --json-line=SRTSTATS_OUTPUT_NODE_B: -O file -"
+  "tsp -I srt --listener :${NODE_B_PORT} ${OUTPUT_SRT_SOURCE_COMMON_FLAGS} ${OUTPUT_SRT_NODE_B_EXTRA_FLAGS} --statistics-interval ${OUTPUT_SRT_STATS_INTERVAL_MS} --json-line=SRTSTATS_OUTPUT_NODE_B: -O file -"
   -O
   srt
   --listener

@@ -105,12 +105,18 @@ TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash ex
 TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash examples/generate-node-b.sh
 ```
 
-3. Point node health endpoints in `.env`:
+3. Start a downstream consumer for output listener `:8000`:
+
+```bash
+bash examples/consume-output-output.sh
+```
+
+4. Point node health endpoints in `.env`:
 
 - `NODE_A_HEALTH_URL`
 - `NODE_B_HEALTH_URL`
 
-4. Make node A unhealthy long enough to cross `WATCHDOG_BAD_THRESHOLD`; watchdog
+5. Make node A unhealthy long enough to cross `WATCHDOG_BAD_THRESHOLD`; watchdog
    switches to node B if node B is stably healthy.
 
 ## SRT encryption and per-leg flags
@@ -208,8 +214,8 @@ This starts:
 
 Note: in input observer mode, `gateway_waiting_for_input` can be inferred from
 rapid input flapping with:
-`INPUT_OBSERVER_WAITING_FLAP_WINDOW_SEC` and
-`INPUT_OBSERVER_WAITING_FLAP_THRESHOLD`.
+`WATCHDOG_WAITING_FLAP_WINDOW_SEC` and
+`WATCHDOG_WAITING_FLAP_THRESHOLD`.
 
 ## Local test instructions
 
@@ -225,6 +231,7 @@ rapid input flapping with:
 
 - Start `compose/output-failover.yml`.
 - Start both node generators.
+- Start `examples/consume-output-output.sh` to attach a downstream receiver on `:8000`.
 - Start built-in mock health services with profile:
 
 ```bash

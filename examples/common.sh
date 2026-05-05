@@ -7,3 +7,4 @@ ensure_input_gateway_namespace_for_dockerized_tsp() {
     export TSDUCK_TOOLS_DOCKER_NETWORK="${TSDUCK_TOOLS_DOCKER_NETWORK:-container:srt-input-gateway}"
   fi
 }
+

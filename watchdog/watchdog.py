@@ -78,12 +78,11 @@ class JsonFormatter(logging.Formatter):
 
 class Watchdog:
     def __init__(self) -> None:
-        self.mode = env_str("WATCHDOG_MODE", "controller")
-        self.enable_health_polling = env_bool("WATCHDOG_ENABLE_HEALTH_POLLING", self.mode != "event_observer")
-        self.enable_switch_commands = env_bool("WATCHDOG_ENABLE_SWITCH_COMMANDS", self.mode != "event_observer")
+        self.enable_health_polling = env_bool("WATCHDOG_ENABLE_HEALTH_POLLING", True)
+        self.enable_switch_commands = env_bool("WATCHDOG_ENABLE_SWITCH_COMMANDS", True)
         self.enable_waiting_inference = env_bool(
             "WATCHDOG_ENABLE_WAITING_INFERENCE",
-            self.mode == "event_observer",
+            True,
         )
         self.waiting_flap_window_sec = env_float("WATCHDOG_WAITING_FLAP_WINDOW_SEC", 8.0)
         self.waiting_flap_threshold = env_int("WATCHDOG_WAITING_FLAP_THRESHOLD", 3)
@@ -216,7 +215,6 @@ class Watchdog:
                     "event_port": self.event_port,
                     "metrics_host": self.metrics_host,
                     "metrics_port": self.metrics_port,
-                    "mode": self.mode,
                     "enable_health_polling": self.enable_health_polling,
                     "enable_switch_commands": self.enable_switch_commands,
                     "enable_waiting_inference": self.enable_waiting_inference,
@@ -274,7 +272,8 @@ class Watchdog:
                 },
             )
 
-            if desired != self.commanded_input:
+            # Keep retrying until tsswitch confirms active input change via event.
+            if desired != self.current_active_input:
                 self._send_switch_command(desired)
 
     def _check_node(self, node: NodeState) -> bool:
@@ -344,7 +343,7 @@ class Watchdog:
         # Policy:
         # - Prefer node A whenever it is stably healthy.
         # - Only use node B when node A is stably unhealthy and node B is healthy.
-        desired = self.commanded_input
+        desired = self.current_active_input
         if self.node_a.stable_healthy:
             desired = 0
         elif self.node_a.stable_unhealthy and self.node_b.stable_healthy:
@@ -359,12 +358,12 @@ class Watchdog:
             )
             return
         with self._span("send_switch_command"):
-            payload = f"{target_input}\n".encode("utf-8")
+            command_text = str(target_input)
+            payload = f"{command_text}\n".encode("utf-8")
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock.sendto(payload, (self.remote_host, self.remote_port))
                 sock.close()
-                self.commanded_input = target_input
                 if self.metric_switch_cmd is not None:
                     self.metric_switch_cmd.labels(target=str(target_input), result="ok").inc()
                 self.metric_last_switch_ts.set(time.time())
@@ -373,6 +372,8 @@ class Watchdog:
                     extra={
                         "extra_data": {
                             "target_input": target_input,
+                            "command_text": command_text,
+                            "payload_len": len(payload),
                             "remote_host": self.remote_host,
                             "remote_port": self.remote_port,
                         }
@@ -422,6 +423,7 @@ class Watchdog:
             if new_input is not None:
                 previous_input = self.current_active_input
                 self.current_active_input = new_input
+                self.commanded_input = new_input
                 self.last_switch_event_ts = time.time()
                 self.metric_active_input.set(new_input)
                 if previous_input != new_input:
