@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import threading
@@ -108,6 +109,7 @@ class Watchdog:
         self.commanded_input = self.current_active_input
         self.last_switch_event_ts = time.time()
         self.recent_switches: deque[tuple[float, int]] = deque(maxlen=128)
+        self.srt_leg_byte_totals: dict[tuple[str, str], float] = {}
         self.stop_event = threading.Event()
         self.event_thread: Optional[threading.Thread] = None
         self.started_monotonic = time.monotonic()
@@ -182,6 +184,16 @@ class Watchdog:
         self.metric_waiting_for_input = Gauge(
             "gateway_waiting_for_input",
             "Whether tsswitch appears to be waiting for a valid input (1=yes,0=no)",
+        )
+        self.metric_gateway_bytes = Counter(
+            "gateway_bytes_total",
+            "Gateway SRT bytes observed from periodic SRT statistics",
+            ["direction", "leg"],
+        )
+        self.metric_gateway_bytes_direction = Counter(
+            "gateway_bytes_by_direction_total",
+            "Gateway SRT bytes observed by direction",
+            ["direction"],
         )
         self.metric_loop_errors = Counter("watchdog_loop_errors_total", "Main loop exceptions")
 
@@ -404,6 +416,7 @@ class Watchdog:
             self.metric_last_event_ts.set(time.time())
             event_type = self._extract_event_type(event)
             self.metric_event_type_total.labels(event_type=event_type).inc()
+            self._process_srt_stats_event(event)
 
             new_input = self._extract_new_input(event)
             if new_input is not None:
@@ -445,6 +458,84 @@ class Watchdog:
             return False
         inputs = {item[1] for item in self.recent_switches}
         return len(inputs) >= 2
+
+    def _process_srt_stats_event(self, event: object) -> None:
+        if not isinstance(event, dict):
+            return
+        if self._extract_event_type(event) != "srtstats":
+            return
+
+        leg = str(event.get("leg", "unknown"))
+        direction = str(event.get("direction", "unknown")).strip().lower()
+        if direction not in {"in", "out"}:
+            return
+        stats = event.get("stats")
+        if not isinstance(stats, dict):
+            return
+
+        recv_total, sent_total = self._extract_srt_byte_totals(stats)
+        selected_total = recv_total if direction == "in" else sent_total
+        if selected_total is None:
+            return
+
+        state_key = (direction, leg)
+        previous_total = self.srt_leg_byte_totals.get(state_key)
+        self.srt_leg_byte_totals[state_key] = selected_total
+        if previous_total is None:
+            if selected_total > 0:
+                self.metric_gateway_bytes.labels(direction=direction, leg=leg).inc(selected_total)
+                self.metric_gateway_bytes_direction.labels(direction=direction).inc(selected_total)
+            return
+
+        delta = selected_total - previous_total
+        # Socket reconnects or counter resets can lower totals; only expose monotonic deltas.
+        if delta <= 0:
+            return
+
+        self.metric_gateway_bytes.labels(direction=direction, leg=leg).inc(delta)
+        self.metric_gateway_bytes_direction.labels(direction=direction).inc(delta)
+
+    @staticmethod
+    def _extract_srt_byte_totals(stats: dict) -> tuple[Optional[float], Optional[float]]:
+        recv_total: Optional[float] = None
+        sent_total: Optional[float] = None
+        recv_fallback: Optional[float] = None
+        sent_fallback: Optional[float] = None
+
+        recv_tokens = {"recv", "received", "rx"}
+        sent_tokens = {"send", "sent", "tx"}
+
+        stack: list[tuple[object, list[str]]] = [(stats, [])]
+        while stack:
+            current, path = stack.pop()
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    key_norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                    stack.append((value, path + [key_norm]))
+            elif isinstance(current, list):
+                for item in current:
+                    stack.append((item, path))
+            elif isinstance(current, (int, float)):
+                context = "".join(path)
+                has_bytes = "byte" in context
+                if not has_bytes:
+                    continue
+
+                is_total = "total" in context and "interval" not in context
+                is_recv = any(token in context for token in recv_tokens)
+                is_sent = any(token in context for token in sent_tokens)
+                numeric_value = float(current)
+
+                if is_recv and is_total:
+                    recv_total = numeric_value
+                elif is_sent and is_total:
+                    sent_total = numeric_value
+                elif is_recv and recv_fallback is None:
+                    recv_fallback = numeric_value
+                elif is_sent and sent_fallback is None:
+                    sent_fallback = numeric_value
+
+        return (recv_total if recv_total is not None else recv_fallback, sent_total if sent_total is not None else sent_fallback)
 
     @staticmethod
     def _extract_new_input(event: dict) -> Optional[int]:

@@ -175,6 +175,8 @@ Key watchdog metrics:
 - `gateway_last_switch_unixtime`
 - `watchdog_switch_commands_total`
 - `watchdog_switch_events_total`
+- `gateway_bytes_total{direction=...,leg=...}`
+- `gateway_bytes_by_direction_total{direction=...}`
 - `watchdog_event_type_total{event_type=...}`
 - `watchdog_node_health`
 - `watchdog_health_checks_total`

@@ -9,6 +9,7 @@ VERBOSE="${INPUT_FAILOVER_VERBOSE:-1}"
 INPUT_EVENT_UDP_HOST="${INPUT_EVENT_UDP_HOST:-127.0.0.1}"
 INPUT_EVENT_UDP_PORT="${INPUT_EVENT_UDP_PORT:-5557}"
 INPUT_EVENT_USER_DATA="${INPUT_EVENT_USER_DATA:-input-failover}"
+INPUT_SRT_STATS_INTERVAL_MS="${INPUT_SRT_STATS_INTERVAL_MS:-5000}"
 INPUT_SRT_SOURCE_COMMON_FLAGS="${INPUT_SRT_SOURCE_COMMON_FLAGS:---multiple --transtype live --messageapi}"
 INPUT_SRT_PRIMARY_EXTRA_FLAGS="${INPUT_SRT_PRIMARY_EXTRA_FLAGS:-}"
 INPUT_SRT_BACKUP_EXTRA_FLAGS="${INPUT_SRT_BACKUP_EXTRA_FLAGS:-}"
@@ -19,6 +20,25 @@ if [[ "${VERBOSE}" == "1" ]]; then
   TSSWITCH_ARGS+=("-v")
 fi
 read -r -a INPUT_SRT_OUTPUT_EXTRA_FLAGS_ARR <<< "${INPUT_SRT_OUTPUT_EXTRA_FLAGS}"
+
+emit_srt_stats_event() {
+  local leg="$1"
+  local direction="$2"
+  local json_payload="$3"
+  printf '{"event":"srtstats","gateway":"input","leg":"%s","direction":"%s","stats":%s}\n' \
+    "${leg}" "${direction}" "${json_payload}" >"/dev/udp/${INPUT_EVENT_UDP_HOST}/${INPUT_EVENT_UDP_PORT}" || true
+}
+
+forward_stats_from_logs() {
+  local prefix="$1"
+  local leg="$2"
+  local direction="$3"
+  local line="$4"
+  if [[ "${line}" == *"${prefix}"* ]]; then
+    local json_payload="${line#*"${prefix}"}"
+    emit_srt_stats_event "${leg}" "${direction}" "${json_payload}"
+  fi
+}
 
 # Wrap SRT listeners with -I fork + tsp so each leg can restart
 # independently after disconnects. This avoids listener-session end-of-stream
@@ -34,14 +54,17 @@ CMD=(
   --event-user-data "${INPUT_EVENT_USER_DATA}"
   -I
   fork
-  "tsp -I srt --listener :${PRIMARY_LISTEN_PORT} ${INPUT_SRT_SOURCE_COMMON_FLAGS} ${INPUT_SRT_PRIMARY_EXTRA_FLAGS} -O file -"
+  "tsp -I srt --listener :${PRIMARY_LISTEN_PORT} ${INPUT_SRT_SOURCE_COMMON_FLAGS} ${INPUT_SRT_PRIMARY_EXTRA_FLAGS} --statistics-interval ${INPUT_SRT_STATS_INTERVAL_MS} --json-line=SRTSTATS_INPUT_PRIMARY: -O file -"
   -I
   fork
-  "tsp -I srt --listener :${BACKUP_LISTEN_PORT} ${INPUT_SRT_SOURCE_COMMON_FLAGS} ${INPUT_SRT_BACKUP_EXTRA_FLAGS} -O file -"
+  "tsp -I srt --listener :${BACKUP_LISTEN_PORT} ${INPUT_SRT_SOURCE_COMMON_FLAGS} ${INPUT_SRT_BACKUP_EXTRA_FLAGS} --statistics-interval ${INPUT_SRT_STATS_INTERVAL_MS} --json-line=SRTSTATS_INPUT_BACKUP: -O file -"
   -O
   srt
   --listener
   ":${OUTPUT_LISTEN_PORT}"
+  --statistics-interval
+  "${INPUT_SRT_STATS_INTERVAL_MS}"
+  --json-line=SRTSTATS_INPUT_OUTPUT:
   "${INPUT_SRT_OUTPUT_EXTRA_FLAGS_ARR[@]}"
 )
 
@@ -49,4 +72,11 @@ echo "[input-failover] Starting command:"
 printf '  %q' "${CMD[@]}"
 echo
 
-exec "${CMD[@]}"
+"${CMD[@]}" 2> >(
+  while IFS= read -r line; do
+    echo "${line}" >&2
+    forward_stats_from_logs "SRTSTATS_INPUT_PRIMARY:" "primary" "in" "${line}"
+    forward_stats_from_logs "SRTSTATS_INPUT_BACKUP:" "backup" "in" "${line}"
+    forward_stats_from_logs "SRTSTATS_INPUT_OUTPUT:" "output" "out" "${line}"
+  done
+)

@@ -401,6 +401,58 @@
       ],
       "title": "Watchdog Uptime (s)",
       "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(gateway_bytes_by_direction_total{direction=\"in\"}[1m]) * 8",
+          "legendFormat": "inbound",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(gateway_bytes_by_direction_total{direction=\"out\"}[1m]) * 8",
+          "legendFormat": "outbound",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Gateway Throughput",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",
@@ -421,6 +473,6 @@
   "timezone": "",
   "title": "SRT Redundancy Overview",
   "uid": "srt-redundancy-overview",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }
