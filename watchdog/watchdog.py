@@ -48,6 +48,8 @@ def env_bool(name: str, default: bool) -> bool:
 class NodeState:
     name: str
     url: str
+    ok_regex: str = ""
+    fail_regex: str = ""
     good_streak: int = 0
     bad_streak: int = 0
     stable_healthy: bool = False
@@ -87,8 +89,18 @@ class Watchdog:
         self.waiting_flap_window_sec = env_float("WATCHDOG_WAITING_FLAP_WINDOW_SEC", 8.0)
         self.waiting_flap_threshold = env_int("WATCHDOG_WAITING_FLAP_THRESHOLD", 3)
 
-        self.node_a = NodeState("a", env_str("NODE_A_HEALTH_URL", "http://127.0.0.1:18081/health"))
-        self.node_b = NodeState("b", env_str("NODE_B_HEALTH_URL", "http://127.0.0.1:18082/health"))
+        self.node_a = NodeState(
+            "a",
+            env_str("NODE_A_HEALTH_URL", "http://127.0.0.1:18081/health"),
+            env_str("NODE_A_HEALTH_OK_REGEX", "").strip(),
+            env_str("NODE_A_HEALTH_FAIL_REGEX", "").strip(),
+        )
+        self.node_b = NodeState(
+            "b",
+            env_str("NODE_B_HEALTH_URL", "http://127.0.0.1:18082/health"),
+            env_str("NODE_B_HEALTH_OK_REGEX", "").strip(),
+            env_str("NODE_B_HEALTH_FAIL_REGEX", "").strip(),
+        )
 
         self.poll_interval = env_float("WATCHDOG_POLL_INTERVAL_SEC", 1.0)
         self.timeout = env_float("WATCHDOG_HEALTH_TIMEOUT_SEC", 1.5)
@@ -209,6 +221,10 @@ class Watchdog:
                 "extra_data": {
                     "node_a_url": self.node_a.url,
                     "node_b_url": self.node_b.url,
+                    "node_a_health_ok_regex": self.node_a.ok_regex,
+                    "node_a_health_fail_regex": self.node_a.fail_regex,
+                    "node_b_health_ok_regex": self.node_b.ok_regex,
+                    "node_b_health_fail_regex": self.node_b.fail_regex,
                     "remote_host": self.remote_host,
                     "remote_port": self.remote_port,
                     "event_host": self.event_host,
@@ -286,6 +302,14 @@ class Watchdog:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     ok = 200 <= resp.status < 300
                     result = "ok" if ok else "bad_status"
+                    if ok and (node.ok_regex or node.fail_regex):
+                        body = resp.read().decode("utf-8", errors="replace")
+                        if node.fail_regex and re.search(node.fail_regex, body):
+                            ok = False
+                            result = "fail_regex_matched"
+                        elif node.ok_regex and not re.search(node.ok_regex, body):
+                            ok = False
+                            result = "ok_regex_missing"
             except urllib.error.HTTPError:
                 result = "bad_status"
             except urllib.error.URLError:

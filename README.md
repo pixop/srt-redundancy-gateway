@@ -115,6 +115,9 @@ bash examples/consume-output-output.sh
 
 - `NODE_A_HEALTH_URL`
 - `NODE_B_HEALTH_URL`
+- Optional body matchers for smarter health:
+  - `NODE_A_HEALTH_OK_REGEX` / `NODE_B_HEALTH_OK_REGEX`
+  - `NODE_A_HEALTH_FAIL_REGEX` / `NODE_B_HEALTH_FAIL_REGEX`
 
 5. Make node A unhealthy long enough to cross `WATCHDOG_BAD_THRESHOLD`; watchdog
    switches to node B if node B is stably healthy.
