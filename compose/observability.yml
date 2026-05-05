@@ -1,0 +1,46 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: srt-redundancy-prometheus
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.107.0
+    container_name: srt-redundancy-otel-collector
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["observability"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    container_name: srt-redundancy-tempo
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["observability"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+    command:
+      - -config.file=/etc/tempo.yaml
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: srt-redundancy-grafana
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro

@@ -84,8 +84,6 @@ class Watchdog:
             "WATCHDOG_ENABLE_WAITING_INFERENCE",
             self.mode == "event_observer",
         )
-        self.enable_waiting_timeout_inference = env_bool("WATCHDOG_ENABLE_WAITING_TIMEOUT_INFERENCE", False)
-        self.waiting_infer_timeout_sec = env_float("WATCHDOG_WAITING_INFER_TIMEOUT_SEC", 3.0)
         self.waiting_flap_window_sec = env_float("WATCHDOG_WAITING_FLAP_WINDOW_SEC", 8.0)
         self.waiting_flap_threshold = env_int("WATCHDOG_WAITING_FLAP_THRESHOLD", 3)
 
@@ -112,6 +110,7 @@ class Watchdog:
         self.recent_switches: deque[tuple[float, int]] = deque(maxlen=128)
         self.stop_event = threading.Event()
         self.event_thread: Optional[threading.Thread] = None
+        self.started_monotonic = time.monotonic()
 
         self.logger = logging.getLogger("watchdog")
         self._configure_logging()
@@ -145,6 +144,7 @@ class Watchdog:
 
     def _init_metrics(self) -> None:
         self.metric_up = Gauge("watchdog_up", "Watchdog process running state")
+        self.metric_uptime_seconds = Gauge("watchdog_uptime_seconds", "Seconds since watchdog process start")
         self.metric_active_input = Gauge("gateway_active_input", "Current active tsswitch input index")
         self.metric_last_switch_ts = Gauge("gateway_last_switch_unixtime", "Unix time of last successful switch command")
 
@@ -188,6 +188,7 @@ class Watchdog:
     def start(self) -> None:
         start_http_server(self.metrics_port, addr=self.metrics_host)
         self.metric_up.set(1)
+        self.metric_uptime_seconds.set(time.monotonic() - self.started_monotonic)
         self.metric_active_input.set(self.current_active_input)
         self.metric_waiting_for_input.set(0)
 
@@ -207,8 +208,6 @@ class Watchdog:
                     "enable_health_polling": self.enable_health_polling,
                     "enable_switch_commands": self.enable_switch_commands,
                     "enable_waiting_inference": self.enable_waiting_inference,
-                    "enable_waiting_timeout_inference": self.enable_waiting_timeout_inference,
-                    "waiting_infer_timeout_sec": self.waiting_infer_timeout_sec,
                     "waiting_flap_window_sec": self.waiting_flap_window_sec,
                     "waiting_flap_threshold": self.waiting_flap_threshold,
                     "poll_interval_sec": self.poll_interval,
@@ -225,6 +224,7 @@ class Watchdog:
 
         while not self.stop_event.is_set():
             try:
+                self.metric_uptime_seconds.set(time.monotonic() - self.started_monotonic)
                 if self.enable_health_polling:
                     self.run_cycle()
                 self._refresh_waiting_inference()
@@ -434,10 +434,7 @@ class Watchdog:
         if not self.enable_waiting_inference:
             return
         flapping = self._is_flapping_waiting()
-        timeout_waiting = self.enable_waiting_timeout_inference and (
-            (time.time() - self.last_switch_event_ts) >= self.waiting_infer_timeout_sec
-        )
-        waiting_now = flapping or timeout_waiting
+        waiting_now = flapping
         self.metric_waiting_for_input.set(1 if waiting_now else 0)
 
     def _is_flapping_waiting(self) -> bool:

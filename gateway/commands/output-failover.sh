@@ -13,11 +13,16 @@ ALLOW_HOST="${TSSWITCH_ALLOW_HOST:-127.0.0.1}"
 EVENT_UDP_HOST="${TSSWITCH_EVENT_UDP_HOST:-127.0.0.1}"
 EVENT_UDP_PORT="${TSSWITCH_EVENT_UDP_PORT:-5556}"
 VERBOSE="${OUTPUT_FAILOVER_VERBOSE:-1}"
+OUTPUT_SRT_SOURCE_COMMON_FLAGS="${OUTPUT_SRT_SOURCE_COMMON_FLAGS:---transtype live --messageapi}"
+OUTPUT_SRT_NODE_A_EXTRA_FLAGS="${OUTPUT_SRT_NODE_A_EXTRA_FLAGS:-}"
+OUTPUT_SRT_NODE_B_EXTRA_FLAGS="${OUTPUT_SRT_NODE_B_EXTRA_FLAGS:-}"
+OUTPUT_SRT_OUTPUT_EXTRA_FLAGS="${OUTPUT_SRT_OUTPUT_EXTRA_FLAGS:---multiple --transtype live --messageapi}"
 
 TSSWITCH_ARGS=()
 if [[ "${VERBOSE}" == "1" ]]; then
   TSSWITCH_ARGS+=("-v")
 fi
+read -r -a OUTPUT_SRT_OUTPUT_EXTRA_FLAGS_ARR <<< "${OUTPUT_SRT_OUTPUT_EXTRA_FLAGS}"
 
 # In caller mode, wrapping the SRT source with -I fork keeps each leg
 # independently restartable after network/peer interruptions.
@@ -34,18 +39,15 @@ CMD=(
   --event-user-data "srt-redundancy-gateway"
   -I
   fork
-  "tsp -I srt --caller ${NODE_A_HOST}:${NODE_A_PORT} --transtype live --messageapi -O file -"
+  "tsp -I srt --caller ${NODE_A_HOST}:${NODE_A_PORT} ${OUTPUT_SRT_SOURCE_COMMON_FLAGS} ${OUTPUT_SRT_NODE_A_EXTRA_FLAGS} -O file -"
   -I
   fork
-  "tsp -I srt --caller ${NODE_B_HOST}:${NODE_B_PORT} --transtype live --messageapi -O file -"
+  "tsp -I srt --caller ${NODE_B_HOST}:${NODE_B_PORT} ${OUTPUT_SRT_SOURCE_COMMON_FLAGS} ${OUTPUT_SRT_NODE_B_EXTRA_FLAGS} -O file -"
   -O
   srt
   --listener
-  "0.0.0.0:${OUTPUT_LISTEN_PORT}"
-  --multiple
-  --transtype
-  live
-  --messageapi
+  ":${OUTPUT_LISTEN_PORT}"
+  "${OUTPUT_SRT_OUTPUT_EXTRA_FLAGS_ARR[@]}"
 )
 
 echo "[output-failover] Starting command:"

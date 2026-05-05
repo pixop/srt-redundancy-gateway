@@ -39,13 +39,13 @@ restartable and improves reconnect behavior for listener/caller workflows.
 
 - `docker/tsduck-gateway/Dockerfile` - gateway image with TSDuck tools
 - `docker/tsduck-tools/Dockerfile` - standalone TSDuck tools image for local generators
+- `docker/health-watchdog/Dockerfile` - watchdog image
 - `gateway/commands/input-failover.sh` - input redundancy command wrapper
 - `gateway/commands/output-failover.sh` - output redundancy command wrapper
-- `docker/health-watchdog/Dockerfile` - watchdog image
 - `watchdog/watchdog.py` - health polling + hysteresis + remote control + metrics/traces
 - `compose/input-failover.yml` - input failover deployment
-- `compose/output-failover.yml` - output failover deployment (+ watchdog)
-- `compose/combined-example.yml` - both patterns together
+- `compose/output-failover.yml` - output failover deployment
+- `compose/observability.yml` - shared Prometheus/OTel/Tempo/Grafana stack
 - `examples/` - local fake SRT source scripts
 
 ## Quick start
@@ -113,12 +113,43 @@ TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash ex
 4. Make node A unhealthy long enough to cross `WATCHDOG_BAD_THRESHOLD`; watchdog
    switches to node B if node B is stably healthy.
 
-## Prometheus and OpenTelemetry
+## SRT encryption and per-leg flags
 
-Enable observability profile in output/combined compose:
+Use per-direction/per-leg env vars to add SRT plugin arguments without editing
+scripts:
+
+- Input shared for both ingest legs:
+  - `INPUT_SRT_SOURCE_COMMON_FLAGS`
+- Input leg-specific overrides:
+  - `INPUT_SRT_PRIMARY_EXTRA_FLAGS`
+  - `INPUT_SRT_BACKUP_EXTRA_FLAGS`
+- Input selected output listener:
+  - `INPUT_SRT_OUTPUT_EXTRA_FLAGS`
+- Output side shared for node A/B callers:
+  - `OUTPUT_SRT_SOURCE_COMMON_FLAGS`
+- Output node-specific overrides:
+  - `OUTPUT_SRT_NODE_A_EXTRA_FLAGS`
+  - `OUTPUT_SRT_NODE_B_EXTRA_FLAGS`
+- Output selected output listener:
+  - `OUTPUT_SRT_OUTPUT_EXTRA_FLAGS`
+
+Example:
 
 ```bash
-docker compose -f compose/output-failover.yml --profile observability up --build
+# Identical input-side credentials for primary + backup.
+INPUT_SRT_SOURCE_COMMON_FLAGS="--multiple --transtype live --messageapi --passphrase input-secret --pbkeylen 16"
+
+# Different credentials on output side for each upstream node.
+OUTPUT_SRT_NODE_A_EXTRA_FLAGS="--passphrase node-a-secret --pbkeylen 16"
+OUTPUT_SRT_NODE_B_EXTRA_FLAGS="--passphrase node-b-secret --pbkeylen 16"
+```
+
+## Prometheus and OpenTelemetry
+
+Enable observability with the shared compose overlay:
+
+```bash
+docker compose -f compose/output-failover.yml -f compose/observability.yml --profile observability up --build
 ```
 
 Included:
@@ -138,6 +169,7 @@ Grafana is auto-provisioned with:
 
 Key watchdog metrics:
 
+- `watchdog_uptime_seconds`
 - `gateway_active_input`
 - `gateway_waiting_for_input`
 - `gateway_last_switch_unixtime`
@@ -151,7 +183,20 @@ Key watchdog metrics:
 For input gateway-only observability (no controller watchdog), run:
 
 ```bash
-docker compose -f compose/input-failover.yml --profile observability up --build
+docker compose -f compose/input-failover.yml -f compose/observability.yml --profile observability up --build
+```
+
+To run both input and output gateways on one host with shared observability:
+
+```bash
+docker compose -f compose/input-failover.yml -f compose/output-failover.yml -f compose/observability.yml --profile observability up --build
+```
+
+Or via Makefile shortcuts:
+
+```bash
+make up-both-observability
+make down-both-observability
 ```
 
 This starts:
@@ -163,9 +208,6 @@ Note: in input observer mode, `gateway_waiting_for_input` can be inferred from
 rapid input flapping with:
 `INPUT_OBSERVER_WAITING_FLAP_WINDOW_SEC` and
 `INPUT_OBSERVER_WAITING_FLAP_THRESHOLD`.
-Optional timeout-based inference can be enabled with
-`INPUT_OBSERVER_WAITING_TIMEOUT_INFERENCE=true` and tuned with
-`INPUT_OBSERVER_WAITING_INFER_TIMEOUT_SEC`.
 
 ## Local test instructions
 
@@ -185,6 +227,12 @@ Optional timeout-based inference can be enabled with
 
 ```bash
 docker compose -f compose/output-failover.yml --profile demo-health up --build
+```
+
+Makefile shortcut:
+
+```bash
+make up-output-demo-health
 ```
 
 - Flip node A to unhealthy:
