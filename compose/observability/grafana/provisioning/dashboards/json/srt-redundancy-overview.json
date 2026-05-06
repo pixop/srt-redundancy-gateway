@@ -699,6 +699,58 @@
       ],
       "title": "Health Good/Bad Streaks",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(gateway_bytes_total{job=\"$job\",direction=\"in\",leg=\"node_a\"}[1m]) * 8",
+          "legendFormat": "node_a inbound",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(gateway_bytes_total{job=\"$job\",direction=\"in\",leg=\"node_b\"}[1m]) * 8",
+          "legendFormat": "node_b inbound",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Bridge Feed Inbound Flow (per leg)",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",
@@ -747,6 +799,6 @@
   "timezone": "",
   "title": "SRT Redundancy Overview",
   "uid": "srt-redundancy-overview",
-  "version": 7,
+  "version": 8,
   "weekStart": ""
 }

@@ -105,6 +105,19 @@ TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash ex
 TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash examples/generate-node-b.sh
 ```
 
+Optional bridge mode (when processing nodes expose listener endpoints and you
+want a dedicated reconnect boundary before the gateway):
+
+```bash
+docker compose -f compose/output-failover.yml --profile bridge-connectors up --build
+```
+
+Configure endpoints with:
+- `BRIDGE_A_SOURCE_HOST` / `BRIDGE_A_SOURCE_PORT` -> upstream source for node A bridge
+- `BRIDGE_B_SOURCE_HOST` / `BRIDGE_B_SOURCE_PORT` -> upstream source for node B bridge
+- `BRIDGE_A_TARGET_HOST` / `BRIDGE_A_TARGET_PORT` (default gateway leg A `:7001`)
+- `BRIDGE_B_TARGET_HOST` / `BRIDGE_B_TARGET_PORT` (default gateway leg B `:7002`)
+
 3. Start a downstream consumer for output listener `:8000`:
 
 ```bash
@@ -163,8 +176,8 @@ docker compose -f compose/output-failover.yml -f compose/observability.yml --pro
 
 Included:
 
-- Watchdog Prometheus endpoint: `http://127.0.0.1:9108/metrics`
-- Input event observer endpoint: `http://127.0.0.1:9109/metrics` (when enabled)
+- Output watchdog metrics endpoint: `http://127.0.0.1:9108/metrics`
+- Input event observer metrics endpoint: `http://127.0.0.1:9107/metrics` (when enabled)
 - Prometheus: `http://127.0.0.1:9090`
 - Grafana: `http://127.0.0.1:3000` (admin/admin)
 - OTEL Collector receiver: `127.0.0.1:4318` (HTTP), `127.0.0.1:4317` (gRPC)
@@ -213,7 +226,7 @@ make down-both-observability
 This starts:
 
 - `input-gateway` (emits `--event-udp` to `${INPUT_EVENT_UDP_HOST}:${INPUT_EVENT_UDP_PORT}`)
-- `input-event-observer` (listens on `${INPUT_EVENT_UDP_PORT}` and exports metrics on `:9109`)
+- `input-event-observer` (listens on `${INPUT_EVENT_UDP_PORT}` and exports metrics on `:9107`)
 
 Note: in input observer mode, `gateway_waiting_for_input` can be inferred from
 rapid input flapping with:

@@ -35,8 +35,6 @@ services:
     env_file:
       - ../.env
     environment:
-      NODE_A_HEALTH_URL: ${NODE_A_HEALTH_URL:-http://127.0.0.1:18081/health}
-      NODE_B_HEALTH_URL: ${NODE_B_HEALTH_URL:-http://127.0.0.1:18082/health}
       WATCHDOG_POLL_INTERVAL_SEC: ${WATCHDOG_POLL_INTERVAL_SEC:-1.0}
       WATCHDOG_HEALTH_TIMEOUT_SEC: ${WATCHDOG_HEALTH_TIMEOUT_SEC:-1.5}
       WATCHDOG_GOOD_THRESHOLD: ${WATCHDOG_GOOD_THRESHOLD:-3}
@@ -54,6 +52,44 @@ services:
       OTEL_ENABLED: ${OTEL_ENABLED:-false}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-srt-redundancy-watchdog}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318/v1/traces}
+
+  output-bridge-a:
+    build:
+      context: ..
+      dockerfile: docker/tsduck-gateway/Dockerfile
+    container_name: srt-output-bridge-a
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["bridge-connectors"]
+    depends_on:
+      - output-gateway
+    env_file:
+      - ../.env
+    environment:
+      BRIDGE_NAME: output-bridge-a
+      BRIDGE_KEY: A
+      BRIDGE_VERBOSE: ${BRIDGE_VERBOSE:-1}
+      BRIDGE_SRT_COMMON_FLAGS: ${BRIDGE_SRT_COMMON_FLAGS:---transtype live --messageapi}
+    command: ["bash", "/app/gateway/commands/output-bridge.sh"]
+
+  output-bridge-b:
+    build:
+      context: ..
+      dockerfile: docker/tsduck-gateway/Dockerfile
+    container_name: srt-output-bridge-b
+    network_mode: host
+    restart: unless-stopped
+    profiles: ["bridge-connectors"]
+    depends_on:
+      - output-gateway
+    env_file:
+      - ../.env
+    environment:
+      BRIDGE_NAME: output-bridge-b
+      BRIDGE_KEY: B
+      BRIDGE_VERBOSE: ${BRIDGE_VERBOSE:-1}
+      BRIDGE_SRT_COMMON_FLAGS: ${BRIDGE_SRT_COMMON_FLAGS:---transtype live --messageapi}
+    command: ["bash", "/app/gateway/commands/output-bridge.sh"]
 
   mock-health-a:
     image: python:3.12-slim
