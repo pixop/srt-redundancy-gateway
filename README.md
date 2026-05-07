@@ -165,17 +165,6 @@ Common watchdog metrics:
 - `watchdog_health_checks_total`
 - `gateway_bytes_total`
 
-## Repository layout
-
-- `gateway/commands/input-failover.sh`
-- `gateway/commands/output-failover.sh`
-- `gateway/commands/output-bridge.sh`
-- `watchdog/watchdog.py`
-- `compose/input-failover.yml`
-- `compose/output-failover.yml`
-- `compose/observability.yml`
-- `examples/`
-
 ## Production notes
 
 - Services run with host networking; keep ports explicit and unique per host.
