@@ -1,302 +1,188 @@
 # srt-redundancy-gateway
 
-Reusable live MPEG-TS over SRT redundancy middleware built with TSDuck.
+Dockerized MPEG-TS over SRT redundancy gateways built with TSDuck.
 
-This repository provides two Dockerized gateway patterns:
+This repo exposes one stable downstream SRT endpoint while handling upstream
+path failures in front of it.
 
-1. Input redundancy gateway (primary/backup ingest -> single selected output)
-2. Output redundancy gateway (node A/node B outputs -> single selected output with watchdog control)
+## What is implemented
 
-The rest of your media pipeline consumes one stable SRT endpoint and remains
-unchanged.
+- Input failover gateway (primary + backup ingest -> one selected output).
+- Output failover gateway (node A + node B ingest -> one selected output).
+- Python watchdog for output failover health polling and controlled switching.
+- Optional bridge connectors for output mode.
+- Optional observability stack (Prometheus, Grafana, OTEL Collector, Tempo).
 
-## Architecture overview
+## Architecture
 
-### Input redundancy
+### Input failover (`compose/input-failover.yml`)
 
-- `tsswitch` receives two SRT listener inputs (primary and backup).
-- Primary input is preferred (`--primary-input 0`).
-- On packet timeout (`--receive-timeout`), `tsswitch` selects backup.
-- One selected SRT listener output is exposed downstream.
-- `tsswitch --event-udp` events can be exported and observed by an event-only observer service.
+- `tsswitch` listens on two SRT inputs (`PRIMARY_LISTEN_PORT`, `BACKUP_LISTEN_PORT`).
+- Input `0` is preferred (`--primary-input 0`).
+- On receive timeout, traffic switches to backup.
+- Selected stream is exposed as one SRT listener (`INPUT_FAILOVER_OUTPUT_LISTEN_PORT`).
+- `--event-udp` emits switch/events; optional `input-event-observer` consumes those events and exports metrics.
 
-### Output redundancy
+### Output failover (`compose/output-failover.yml`)
 
-- `tsswitch` receives two SRT caller inputs (node A and node B).
-- A Python watchdog polls health endpoints for node A and node B.
-- Watchdog sends UDP remote-control commands to `tsswitch` (`--remote`).
-- Hysteresis thresholds avoid flapping.
-- `tsswitch --event-udp` events are consumed by watchdog for active-input observability.
+- `tsswitch` listens on two SRT inputs (`NODE_A_PORT`, `NODE_B_PORT`) and exposes one SRT listener output (`OUTPUT_FAILOVER_OUTPUT_LISTEN_PORT`).
+- `watchdog/watchdog.py` polls `NODE_A_HEALTH_URL` and `NODE_B_HEALTH_URL` (with optional body regex checks).
+- Watchdog sends UDP remote commands to `tsswitch` (`--remote`) and tracks active input from `--event-udp` events.
+- Policy is A-preferred: switch to B only when A is stably unhealthy and B is stably healthy; fail back to A when A becomes stably healthy.
 
-## Why `-I fork` around SRT legs
+### Why `-I fork` is used
 
-SRT sessions are connection-oriented. A disconnect can otherwise look like an
-end-of-input lifecycle event to `tsswitch` in long-running failover scenarios.
-Wrapping each leg in `-I fork "tsp -I srt ... -O file -"` makes each leg
-restartable and improves reconnect behavior for listener/caller workflows.
-
-## Repository layout
-
-- `docker/tsduck-gateway/Dockerfile` - gateway image with TSDuck tools
-- `docker/tsduck-tools/Dockerfile` - standalone TSDuck tools image for local generators
-- `docker/health-watchdog/Dockerfile` - watchdog image
-- `gateway/commands/input-failover.sh` - input redundancy command wrapper
-- `gateway/commands/output-failover.sh` - output redundancy command wrapper
-- `watchdog/watchdog.py` - health polling + hysteresis + remote control + metrics/traces
-- `compose/input-failover.yml` - input failover deployment
-- `compose/output-failover.yml` - output failover deployment
-- `compose/observability.yml` - shared Prometheus/OTel/Tempo/Grafana stack
-- `examples/` - local fake SRT source scripts
+Each SRT leg is wrapped with `-I fork "tsp -I srt ... -O file -"` so a dropped
+session can restart independently without permanently retiring the leg.
 
 ## Quick start
 
-1. Create env file:
+1) Create local env file:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Build local `tsduck-tools` base image (required for local gateway builds):
+2) Build local tools image (used by `examples/run-tsp.sh` when `tsp` is not installed locally):
 
 ```bash
-docker build -f docker/tsduck-tools/Dockerfile -t srt-redundancy-gateway-tsduck-tools:local .
+make build-tsduck-tools-local
 ```
 
-3. Start input failover gateway:
+## Run input failover demo
 
-```bash
-docker compose -f compose/input-failover.yml up --build
-```
-
-Alternative one-command demo startup (includes a dummy downstream consumer):
+Single-command demo (gateway + demo consumer profile):
 
 ```bash
 make up-input-demo
 ```
 
-4. Start a downstream consumer (keeps output listener active during tests):
+Manual mode:
 
 ```bash
+docker compose -f compose/input-failover.yml up --build
 bash examples/consume-input-output.sh
-```
-
-5. In separate terminals, feed test streams:
-
-```bash
 bash examples/generate-primary.sh
 bash examples/generate-backup.sh
 ```
 
-6. Simulate primary failure by stopping `generate-primary.sh` and verify output
-   remains available on `${INPUT_FAILOVER_OUTPUT_LISTEN_PORT}`.
+Then stop `generate-primary.sh` and confirm continuity on `INPUT_FAILOVER_OUTPUT_LISTEN_PORT`.
 
-## Output failover quick start
+## Run output failover demo
 
-1. Launch gateway and watchdog:
-
-```bash
-docker compose -f compose/output-failover.yml up --build
-```
-
-2. Feed node outputs:
-
-```bash
-TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash examples/generate-node-a.sh
-TSDUCK_TOOLS_IMAGE=<namespace>/srt-redundancy-gateway-tsduck-tools:<tag> bash examples/generate-node-b.sh
-```
-
-Optional bridge mode (when processing nodes expose listener endpoints and you
-want a dedicated reconnect boundary before the gateway):
-
-```bash
-docker compose -f compose/output-failover.yml --profile bridge-connectors up --build
-```
-
-Configure endpoints with:
-- `BRIDGE_A_SOURCE_HOST` / `BRIDGE_A_SOURCE_PORT` -> upstream source for node A bridge
-- `BRIDGE_B_SOURCE_HOST` / `BRIDGE_B_SOURCE_PORT` -> upstream source for node B bridge
-- `BRIDGE_A_TARGET_HOST` / `BRIDGE_A_TARGET_PORT` (default gateway leg A `:7001`)
-- `BRIDGE_B_TARGET_HOST` / `BRIDGE_B_TARGET_PORT` (default gateway leg B `:7002`)
-
-3. Start a downstream consumer for output listener `:8000`:
-
-```bash
-bash examples/consume-output-output.sh
-```
-
-4. Point node health endpoints in `.env`:
-
-- `NODE_A_HEALTH_URL`
-- `NODE_B_HEALTH_URL`
-- Optional body matchers for smarter health:
-  - `NODE_A_HEALTH_OK_REGEX` / `NODE_B_HEALTH_OK_REGEX`
-  - `NODE_A_HEALTH_FAIL_REGEX` / `NODE_B_HEALTH_FAIL_REGEX`
-
-5. Make node A unhealthy long enough to cross `WATCHDOG_BAD_THRESHOLD`; watchdog
-   switches to node B if node B is stably healthy.
-
-## SRT encryption and per-leg flags
-
-Use per-direction/per-leg env vars to add SRT plugin arguments without editing
-scripts:
-
-- Input shared for both ingest legs:
-  - `INPUT_SRT_SOURCE_COMMON_FLAGS`
-- Input leg-specific overrides:
-  - `INPUT_SRT_PRIMARY_EXTRA_FLAGS`
-  - `INPUT_SRT_BACKUP_EXTRA_FLAGS`
-- Input selected output listener:
-  - `INPUT_SRT_OUTPUT_EXTRA_FLAGS`
-- Output side shared for node A/B callers:
-  - `OUTPUT_SRT_SOURCE_COMMON_FLAGS`
-- Output node-specific overrides:
-  - `OUTPUT_SRT_NODE_A_EXTRA_FLAGS`
-  - `OUTPUT_SRT_NODE_B_EXTRA_FLAGS`
-- Output selected output listener:
-  - `OUTPUT_SRT_OUTPUT_EXTRA_FLAGS`
-
-Example:
-
-```bash
-# Identical input-side credentials for primary + backup.
-INPUT_SRT_SOURCE_COMMON_FLAGS="--multiple --transtype live --messageapi --passphrase input-secret --pbkeylen 16"
-
-# Different credentials on output side for each upstream node.
-OUTPUT_SRT_NODE_A_EXTRA_FLAGS="--passphrase node-a-secret --pbkeylen 16"
-OUTPUT_SRT_NODE_B_EXTRA_FLAGS="--passphrase node-b-secret --pbkeylen 16"
-```
-
-## Prometheus and OpenTelemetry
-
-Enable observability with the shared compose overlay:
-
-```bash
-docker compose -f compose/output-failover.yml -f compose/observability.yml --profile observability up --build
-```
-
-Included:
-
-- Output watchdog metrics endpoint: `http://127.0.0.1:9108/metrics`
-- Input event observer metrics endpoint: `http://127.0.0.1:9107/metrics` (when enabled)
-- Prometheus: `http://127.0.0.1:9090`
-- Grafana: `http://127.0.0.1:3000` (admin/admin)
-- OTEL Collector receiver: `127.0.0.1:4318` (HTTP), `127.0.0.1:4317` (gRPC)
-- Tempo API: `http://127.0.0.1:3200`
-
-Grafana is auto-provisioned with:
-
-- Prometheus datasource (`http://127.0.0.1:9090`)
-- Tempo datasource (`http://127.0.0.1:3200`)
-- starter dashboard: `SRT Redundancy Overview`
-
-Key watchdog metrics:
-
-- `watchdog_uptime_seconds`
-- `gateway_active_input`
-- `gateway_waiting_for_input`
-- `gateway_last_switch_unixtime`
-- `watchdog_switch_commands_total`
-- `watchdog_switch_events_total`
-- `gateway_bytes_total{direction=...,leg=...}`
-- `gateway_bytes_by_direction_total{direction=...}`
-- `watchdog_event_type_total{event_type=...}`
-- `watchdog_node_health`
-- `watchdog_health_checks_total`
-- `watchdog_health_check_latency_seconds`
-
-For input gateway-only observability (no controller watchdog), run:
-
-```bash
-docker compose -f compose/input-failover.yml -f compose/observability.yml --profile observability up --build
-```
-
-To run both input and output gateways on one host with shared observability:
-
-```bash
-docker compose -f compose/input-failover.yml -f compose/output-failover.yml -f compose/observability.yml --profile observability up --build
-```
-
-Or via Makefile shortcuts:
-
-```bash
-make up-both-observability
-make down-both-observability
-```
-
-This starts:
-
-- `input-gateway` (emits `--event-udp` to `${INPUT_EVENT_UDP_HOST}:${INPUT_EVENT_UDP_PORT}`)
-- `input-event-observer` (listens on `${INPUT_EVENT_UDP_PORT}` and exports metrics on `:9107`)
-
-Note: in input observer mode, `gateway_waiting_for_input` can be inferred from
-rapid input flapping with:
-`WATCHDOG_WAITING_FLAP_WINDOW_SEC` and
-`WATCHDOG_WAITING_FLAP_THRESHOLD`.
-
-## Local test instructions
-
-### Input gateway continuity check
-
-- Start `compose/input-failover.yml`.
-- Start `examples/consume-input-output.sh` to attach a downstream receiver on `:6000`.
-- Start both `examples/generate-primary.sh` and `examples/generate-backup.sh`.
-- Consume output from `srt://127.0.0.1:${INPUT_FAILOVER_OUTPUT_LISTEN_PORT}`.
-- Stop primary generator and confirm stream continuity from backup.
-
-### Output gateway controlled switch check
-
-- Start `compose/output-failover.yml`.
-- Start both node generators.
-- Start `examples/consume-output-output.sh` to attach a downstream receiver on `:8000`.
-- Start built-in mock health services with profile:
-
-```bash
-docker compose -f compose/output-failover.yml --profile demo-health up --build
-```
-
-Makefile shortcut:
+Start gateway + watchdog + mock health services:
 
 ```bash
 make up-output-demo-health
 ```
 
-- Flip node A to unhealthy:
+Feed both legs and consume output:
+
+```bash
+bash examples/generate-node-a.sh
+bash examples/generate-node-b.sh
+bash examples/consume-output-output.sh
+```
+
+Trigger health changes:
 
 ```bash
 bash examples/set-health.sh 18081 unhealthy
-```
-
-- Restore node A:
-
-```bash
 bash examples/set-health.sh 18081 healthy
 ```
 
-- Flip node A to unhealthy and keep node B healthy.
-- Confirm switch occurs only after bad threshold.
-- Recover node A and verify preferred failback after good threshold.
+## Optional bridge connectors (output mode)
+
+When upstream processing nodes expose their own SRT listeners, enable bridge containers:
+
+```bash
+docker compose -f compose/output-failover.yml --profile bridge-connectors up --build
+```
+
+Main bridge envs:
+
+- `BRIDGE_A_SOURCE_HOST` / `BRIDGE_A_SOURCE_PORT`
+- `BRIDGE_B_SOURCE_HOST` / `BRIDGE_B_SOURCE_PORT`
+- `BRIDGE_A_TARGET_HOST` / `BRIDGE_A_TARGET_PORT` (defaults to gateway leg A)
+- `BRIDGE_B_TARGET_HOST` / `BRIDGE_B_TARGET_PORT` (defaults to gateway leg B)
+
+## SRT option overrides
+
+Use env vars to inject SRT plugin flags without editing scripts.
+
+Input mode:
+
+- `INPUT_SRT_SOURCE_COMMON_FLAGS`
+- `INPUT_SRT_PRIMARY_EXTRA_FLAGS`
+- `INPUT_SRT_BACKUP_EXTRA_FLAGS`
+- `INPUT_SRT_OUTPUT_EXTRA_FLAGS`
+
+Output mode:
+
+- `OUTPUT_SRT_SOURCE_COMMON_FLAGS`
+- `OUTPUT_SRT_NODE_A_EXTRA_FLAGS`
+- `OUTPUT_SRT_NODE_B_EXTRA_FLAGS`
+- `OUTPUT_SRT_OUTPUT_EXTRA_FLAGS`
+
+Example:
+
+```bash
+INPUT_SRT_SOURCE_COMMON_FLAGS="--multiple --transtype live --messageapi --passphrase input-secret --pbkeylen 16"
+OUTPUT_SRT_NODE_A_EXTRA_FLAGS="--passphrase node-a-secret --pbkeylen 16"
+OUTPUT_SRT_NODE_B_EXTRA_FLAGS="--passphrase node-b-secret --pbkeylen 16"
+```
+
+## Observability
+
+Run a gateway plus the shared observability stack:
+
+```bash
+docker compose -f compose/output-failover.yml -f compose/observability.yml --profile observability up --build
+```
+
+Or run both gateways with one shared stack:
+
+```bash
+make up-all
+```
+
+Endpoints:
+
+- Input observer metrics: `http://127.0.0.1:9107/metrics` (when input observability profile is enabled)
+- Output watchdog metrics: `http://127.0.0.1:9108/metrics`
+- Prometheus: `http://127.0.0.1:9090`
+- Grafana: `http://127.0.0.1:3000` (`admin` / `admin`)
+- OTEL Collector: `127.0.0.1:4318` (HTTP), `127.0.0.1:4317` (gRPC)
+- Tempo: `http://127.0.0.1:3200`
+
+Common watchdog metrics:
+
+- `gateway_active_input`
+- `gateway_waiting_for_input`
+- `watchdog_switch_commands_total`
+- `watchdog_switch_events_total`
+- `watchdog_node_health`
+- `watchdog_health_checks_total`
+- `gateway_bytes_total`
+
+## Repository layout
+
+- `gateway/commands/input-failover.sh`
+- `gateway/commands/output-failover.sh`
+- `gateway/commands/output-bridge.sh`
+- `watchdog/watchdog.py`
+- `compose/input-failover.yml`
+- `compose/output-failover.yml`
+- `compose/observability.yml`
+- `examples/`
 
 ## Production notes
 
-- Keep ports/envs explicit; avoid hardcoded node-specific assumptions.
-- Use host networking for operational simplicity in SRT-heavy environments.
-- `tsduck-tools` image builds TSDuck from source (pinned tag in Dockerfile); first build can take several minutes.
-- Keep health checks cheap and deterministic.
-- Tune `WATCHDOG_GOOD_THRESHOLD` / `WATCHDOG_BAD_THRESHOLD` to your jitter profile.
-- Consider adding node-exporter/cAdvisor if container/system-level telemetry is required.
+- Services run with host networking; keep ports explicit and unique per host.
+- Initial `tsduck-tools` image build can take several minutes (TSDuck build from source).
+- Keep health checks deterministic and cheap.
+- Tune `WATCHDOG_GOOD_THRESHOLD` and `WATCHDOG_BAD_THRESHOLD` for your stream jitter profile.
 
-## Docker image publishing
+## Publishing
 
-For Docker Hub publishing steps, see `scripts/README.md`.
-
-## Troubleshooting
-
-- `generate-primary.sh` times out on `srt_connect`:
-  - Ensure a downstream consumer is connected first (`bash examples/consume-input-output.sh`), or run `make up-input-demo`.
-  - Recreate cleanly: `docker compose -f compose/input-failover.yml down && docker compose -f compose/input-failover.yml up --build`.
-  - Verify gateway logs include the `tsswitch` startup line and no rapid restarts.
-
-## Limitations (v1)
-
-- No Kubernetes manifests yet.
-- OTel traces are wired for export, but advanced sampling/tail-based processing is not configured.
+Docker image publishing workflow lives in `scripts/README.md`.
