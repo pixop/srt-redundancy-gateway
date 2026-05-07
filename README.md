@@ -168,8 +168,6 @@ Common watchdog metrics:
 ## Production notes
 
 - Services run with host networking; keep ports explicit and unique per host.
-- Initial `tsduck-tools` image build can take several minutes (TSDuck build from source).
-- Keep health checks deterministic and cheap.
 - Tune `WATCHDOG_GOOD_THRESHOLD` and `WATCHDOG_BAD_THRESHOLD` for your stream jitter profile.
 
 ## Publishing
